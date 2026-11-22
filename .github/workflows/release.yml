@@ -1,0 +1,78 @@
+name: Build and publish LYNX Reader release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release version, for example 0.1.2 or v0.1.2'
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag && (startsWith(inputs.release_tag, 'v') && inputs.release_tag || format('v{0}', inputs.release_tag)) || github.ref_name }}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set package version from release tag
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG.Trim()
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Error "Release tag must look like v0.1.2; received '$tag'."
+            exit 1
+          }
+          $version = $tag.Substring(1)
+          $currentVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($currentVersion -ne $version) {
+            npm version $version --no-git-tag-version
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Create draft release
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG.Trim()
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "${{ github.repository }}" --draft --target "${{ github.sha }}" --title "LYNX Reader $tag" --notes "Windows installer for LYNX Reader $tag."
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish Windows installer
+        run: npm run release:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish completed release
+        shell: pwsh
+        run: |
+          gh release edit "$env:RELEASE_TAG" --repo "${{ github.repository }}" --draft=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
