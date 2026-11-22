@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 .vbook-cookies.json
+src-tauri/target/
+src-tauri/gen/
+

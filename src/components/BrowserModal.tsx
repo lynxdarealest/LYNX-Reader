@@ -25,6 +25,7 @@ import {
   saveManualDomainCookie,
   clearDomainCookies,
 } from '../services/webScraper';
+import { listen } from '@tauri-apps/api/event';
 
 interface BrowserModalProps {
   isOpen: boolean;
@@ -48,6 +49,9 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
 }) => {
   const isElectronMode =
     typeof window !== 'undefined' && Boolean(window.desktopBridge?.isElectron);
+  const isTauriMode =
+    typeof window !== 'undefined' && Boolean(window.desktopBridge?.isTauri);
+  const isDesktopMode = isElectronMode || isTauriMode;
 
   const defaultUrl = initialUrl ? normalizeInputUrl(initialUrl) : '';
   const [history, setHistory] = React.useState<string[]>(defaultUrl ? [defaultUrl] : []);
@@ -59,7 +63,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
   const [reloadNonce, setReloadNonce] = React.useState(0);
   const [isLoadingFrame, setIsLoadingFrame] = React.useState(Boolean(defaultUrl));
   const [proxyAvailable, setProxyAvailable] = React.useState<boolean | null>(
-    isElectronMode ? true : null
+    isDesktopMode ? true : null
   );
   const [challengeBlockedUrl, setChallengeBlockedUrl] = React.useState<string | null>(null);
 
@@ -96,7 +100,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
       getAllSiteCookies().then(setCookieJars);
     });
 
-    if (window.desktopBridge?.isElectron) {
+    if (window.desktopBridge?.isElectron || window.desktopBridge?.isTauri) {
       setProxyAvailable(true);
       window.desktopBridge
         .getPreferredLang()
@@ -104,6 +108,9 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
           if (lang === 'ja' || lang === 'en') setBrowserLang(lang);
         })
         .catch(() => {});
+      if (window.desktopBridge?.isTauri && startUrl) {
+        window.desktopBridge.openBrowserWindow?.(startUrl).catch(() => {});
+      }
       return;
     }
 
@@ -177,9 +184,54 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     };
   }, [isOpen, isElectronMode, iframeSrcUrl, refreshJars]);
 
+  // Listen to Tauri native WebView2 browser window events
+  React.useEffect(() => {
+    if (!isOpen || !isTauriMode) return;
+    let active = true;
+    const unlisteners: Array<() => void> = [];
+
+    Promise.all([
+      listen<{ url?: string; title?: string }>('browser-navigated', (event) => {
+        if (!active) return;
+        const u = event.payload?.url;
+        const t = event.payload?.title;
+        if (u) {
+          setLiveUrl(u);
+          setAddressInput(u);
+        }
+        if (t) setPageTitle(t);
+        setIsLoadingFrame(false);
+      }),
+      listen<{ loading?: boolean; url?: string }>('browser-loading', (event) => {
+        if (!active) return;
+        setIsLoadingFrame(Boolean(event.payload?.loading));
+      }),
+      listen<SiteCookieJar[]>('browser-cookies-updated', (event) => {
+        if (!active) return;
+        if (Array.isArray(event.payload)) {
+          setCookieJars(event.payload);
+        }
+        refreshJars();
+      }),
+    ])
+      .then((fns) => {
+        if (!active) {
+          fns.forEach((fn) => fn());
+        } else {
+          unlisteners.push(...fns);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      unlisteners.forEach((fn) => fn());
+    };
+  }, [isOpen, isTauriMode, refreshJars]);
+
   // Listen to proxied iframe postMessage updates
   React.useEffect(() => {
-    if (!isOpen || isElectronMode) return;
+    if (!isOpen || isDesktopMode) return;
     const handleMessage = (e: MessageEvent) => {
       if (e.data && e.data.type === 'reader-browser-state') {
         const nextUrl = typeof e.data.url === 'string' ? e.data.url : '';
@@ -197,7 +249,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [isOpen, isElectronMode, liveUrl, refreshJars]);
+  }, [isOpen, isDesktopMode, liveUrl, refreshJars]);
 
   React.useEffect(() => {
     if (!showCookiePopover) return;
@@ -224,6 +276,8 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     setIsLoadingFrame(true);
     if (isElectronMode && webviewRef.current) {
       webviewRef.current.loadURL(target).catch(() => {});
+    } else if (isTauriMode) {
+      window.desktopBridge?.navigateBrowserWindow?.(target).catch(() => {});
     }
   };
 
@@ -232,6 +286,10 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
       if (webviewRef.current.canGoBack()) {
         webviewRef.current.goBack();
       }
+      return;
+    }
+    if (isTauriMode) {
+      window.desktopBridge?.browserAction?.('back').catch(() => {});
       return;
     }
     if (historyIndex <= 0) return;
@@ -252,6 +310,10 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
       }
       return;
     }
+    if (isTauriMode) {
+      window.desktopBridge?.browserAction?.('forward').catch(() => {});
+      return;
+    }
     if (historyIndex >= history.length - 1) return;
     const nextIdx = historyIndex + 1;
     const target = history[nextIdx];
@@ -268,6 +330,11 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     setChallengeBlockedUrl(null);
     if (isElectronMode && webviewRef.current) {
       webviewRef.current.reload();
+      setIsLoadingFrame(true);
+      return;
+    }
+    if (isTauriMode) {
+      window.desktopBridge?.browserAction?.('reload').catch(() => {});
       setIsLoadingFrame(true);
       return;
     }
@@ -347,6 +414,8 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
       setIsLoadingFrame(true);
       if (isElectronMode && webviewRef.current) {
         webviewRef.current.loadURL(nextTarget).catch(() => {});
+      } else if (isTauriMode) {
+        window.desktopBridge?.navigateBrowserWindow?.(nextTarget).catch(() => {});
       }
     }
   };
@@ -357,14 +426,31 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
   const totalDomainsCount = cookieJars.filter((j) => j.cookies.length > 0).length;
 
   const proxiedUrl =
-    !isElectronMode && proxyAvailable !== false && iframeSrcUrl
+    !isDesktopMode && proxyAvailable !== false && iframeSrcUrl
       ? `/api/browser/proxy?url=${encodeURIComponent(iframeSrcUrl)}&_v=${reloadNonce}`
       : '';
 
   const showPixivRecaptchaHelper =
-    !isElectronMode && liveUrl.includes('accounts.pixiv.net');
+    !isDesktopMode && liveUrl.includes('accounts.pixiv.net');
   const showChallengeBanner =
-    !isElectronMode && Boolean(challengeBlockedUrl) && !showPixivRecaptchaHelper;
+    !isDesktopMode && Boolean(challengeBlockedUrl) && !showPixivRecaptchaHelper;
+
+  const handleCloseModal = () => {
+    if (isTauriMode) {
+      refreshJars();
+      window.desktopBridge?.browserAction?.('close').catch(() => {});
+    }
+    onClose();
+  };
+
+  const handleImportCurrent = async () => {
+    if (!liveUrl) return;
+    if (isTauriMode) {
+      await refreshJars();
+      window.desktopBridge?.browserAction?.('close').catch(() => {});
+    }
+    onImportFromUrl(liveUrl);
+  };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4">
@@ -375,7 +461,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
           <div className="flex items-center space-x-1">
             <button
               type="button"
-              disabled={!isElectronMode && historyIndex <= 0}
+              disabled={!isDesktopMode && historyIndex <= 0}
               onClick={handleBack}
               className="p-1.5 rounded-lg text-neutral-300 hover:bg-neutral-800 disabled:opacity-30 cursor-pointer"
               title="Quay lại"
@@ -384,7 +470,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
             </button>
             <button
               type="button"
-              disabled={!isElectronMode && historyIndex >= history.length - 1}
+              disabled={!isDesktopMode && historyIndex >= history.length - 1}
               onClick={handleForward}
               className="p-1.5 rounded-lg text-neutral-300 hover:bg-neutral-800 disabled:opacity-30 cursor-pointer"
               title="Tiến tới"
@@ -555,7 +641,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
           <button
             type="button"
             disabled={!liveUrl}
-            onClick={() => onImportFromUrl(liveUrl)}
+            onClick={handleImportCurrent}
             className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold cursor-pointer shadow-xs"
             title="Phân tích và nhập truyện từ trang đang mở (tự dùng Cookie đã lưu)"
           >
@@ -565,7 +651,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
 
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCloseModal}
             className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 cursor-pointer"
             title="Đóng trình duyệt"
           >
@@ -698,7 +784,44 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
 
         {/* Browser Viewport */}
         <div className="flex-1 bg-neutral-950 relative overflow-hidden">
-          {isElectronMode ? (
+          {isTauriMode ? (
+            <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-300 space-y-4">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+                <Globe className="w-7 h-7 text-amber-400" />
+              </div>
+              <div className="space-y-1.5 max-w-lg">
+                <p className="text-sm font-semibold text-neutral-100">
+                  Trình duyệt WebView2 gốc (Tauri)
+                </p>
+                <p className="text-xs text-neutral-400 leading-relaxed">
+                  Cửa sổ trình duyệt gốc giúp đăng nhập Pixiv, vượt xác minh Cloudflare trực tiếp và tự động đồng bộ Cookie về ứng dụng.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => window.desktopBridge?.openBrowserWindow?.(liveUrl || undefined)}
+                  className="flex items-center space-x-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Mở / Hiện cửa sổ trình duyệt</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => refreshJars()}
+                  className="flex items-center space-x-1.5 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Đồng bộ Cookie ({currentCookieCount})</span>
+                </button>
+              </div>
+              {liveUrl && (
+                <p className="text-[11px] font-mono text-neutral-500 max-w-xl truncate">
+                  Đang trỏ tới: {liveUrl}
+                </p>
+              )}
+            </div>
+          ) : isElectronMode ? (
             iframeSrcUrl ? (
               <webview
                 ref={webviewRef}
@@ -723,7 +846,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
                 Bản đóng gói tĩnh từ <code className="text-amber-300">vite build</code> không có máy chủ proxy web
               </p>
               <p className="text-xs max-w-lg leading-relaxed text-neutral-400">
-                Khi đóng gói ứng dụng thành <code className="text-neutral-200">.exe</code>, cần chạy qua shell Electron có sẵn (<code className="text-neutral-200">electron/main.cjs</code>) hoặc bật máy chủ <code className="text-neutral-200">node server.ts</code> để duyệt web và tải truyện trực tiếp.
+                Khi đóng gói ứng dụng thành <code className="text-neutral-200">.exe</code> bằng Tauri hoặc bật máy chủ <code className="text-neutral-200">node server.ts</code>, bạn có thể duyệt web và tải truyện trực tiếp.
               </p>
               {liveUrl && (
                 <a

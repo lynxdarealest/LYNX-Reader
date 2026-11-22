@@ -10,6 +10,7 @@ export interface DesktopFetchChapterResult {
 
 export interface DesktopBridgeApi {
   isElectron: boolean;
+  isTauri?: boolean;
   translate: (joinedPayload: string) => Promise<string>;
   analyzePhrase?: (phrase: string) => Promise<{ vi?: string; nameEng?: string }>;
   inspectUrl: (url: string, cookie?: string) => Promise<WebNovelInspectResult>;
@@ -25,6 +26,9 @@ export interface DesktopBridgeApi {
   clearDomainCookies: (domain: string) => Promise<SiteCookieJar[]>;
   getPreferredLang: () => Promise<'en' | 'ja'>;
   setPreferredLang: (lang: 'en' | 'ja') => Promise<'en' | 'ja'>;
+  openBrowserWindow?: (url?: string) => Promise<void>;
+  navigateBrowserWindow?: (url: string) => Promise<void>;
+  browserAction?: (action: 'back' | 'forward' | 'reload' | 'focus' | 'close') => Promise<void>;
 }
 
 export interface ElectronWebviewElement extends HTMLElement {
