@@ -285,6 +285,24 @@ function isLikelyContentChapters(chapters: ParsedChapterDraft[]): boolean {
   return avgWords >= 30 && substantialCount >= Math.max(2, Math.floor(chapters.length * 0.4));
 }
 
+function shouldIncludePreamble(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const words = countWords(trimmed);
+  // Skip short title pages, source banners, or converter metadata before Chapter 1
+  if (words < 250) return false;
+
+  const head = trimmed.slice(0, 600);
+  const hasMetadataLabels =
+    /(?:^|\n)\s*(?:Tên truyện|Tác giả|Thể loại|Tình trạng|Nguồn|Convert|Editor|Dịch giả|Văn án|Giới thiệu|Tóm tắt|Mục lục)\s*[:：]/im.test(
+      head
+    );
+  if (hasMetadataLabels && words < 600) {
+    return false;
+  }
+  return true;
+}
+
 // Split TXT/ebook raw content by regex rule
 export function splitTextByRule(
   rawText: string,
@@ -334,12 +352,12 @@ export function splitTextByRule(
 
   const chapters: ParsedChapterDraft[] = [];
 
-  // Preamble before first chapter (e.g. Introduction, prologue)
+  // Preamble before first chapter: skip short metadata/intro blurbs, keep only substantial narrative prologue
   if (matches[0].index > 0) {
     const preambleText = cleanedText.slice(0, matches[0].index).trim();
-    if (preambleText.length > 50) {
+    if (shouldIncludePreamble(preambleText)) {
       chapters.push({
-        title: 'Lời giới thiệu / Mở đầu',
+        title: 'Mở đầu',
         content: preambleText,
         wordCount: countWords(preambleText),
       });
@@ -627,9 +645,9 @@ function splitBlocksByHeadingLevel(
       .map((b) => b.text)
       .join('\n\n')
       .trim();
-    if (preText.length > 50) {
+    if (shouldIncludePreamble(preText)) {
       result.push({
-        title: fallbackTitle || 'Lời giới thiệu / Mở đầu',
+        title: fallbackTitle || 'Mở đầu',
         content: preText,
         wordCount: countWords(preText),
       });
@@ -871,7 +889,16 @@ export async function parseEpubFile(file: File): Promise<ParsedBookDraft> {
     .map((el) => el.getAttribute('idref'))
     .filter(Boolean) as string[];
 
-  const chapters: ParsedChapterDraft[] = [];
+  interface SpineSectionData {
+    fileKey: string;
+    fileTocEntries: EpubTocEntry[];
+    blocks: ExtractedHtmlBlock[];
+    joinedText: string;
+    firstHeadingText: string;
+    usableDocTitle: string;
+  }
+
+  const spineSections: SpineSectionData[] = [];
   const rawSegments: string[] = [];
 
   for (let i = 0; i < spineItemRefs.length; i++) {
@@ -911,129 +938,247 @@ export async function parseEpubFile(file: File): Promise<ParsedBookDraft> {
 
     const fileKey = resolved.path.toLowerCase();
     const fileTocEntries = tocByFile.get(fileKey) || [];
-
-    // Strategy 1: Split a single HTML file by multiple TOC #fragment anchors
-    const fragmentEntries = fileTocEntries.filter((e) => e.fragment);
-    if (fragmentEntries.length >= 2) {
-      const anchorSplits: Array<{ blockIdx: number; label: string }> = [];
-      const seenBlockIdx = new Set<number>();
-
-      for (const entry of fragmentEntries) {
-        const blockIdx = blocks.findIndex((b) => b.anchorIds.includes(entry.fragment));
-        if (blockIdx !== -1 && !seenBlockIdx.has(blockIdx)) {
-          seenBlockIdx.add(blockIdx);
-          anchorSplits.push({ blockIdx, label: entry.label });
-        }
-      }
-
-      anchorSplits.sort((a, b) => a.blockIdx - b.blockIdx);
-
-      if (anchorSplits.length >= 2) {
-        if (anchorSplits[0].blockIdx > 0) {
-          const preBlocks = blocks.slice(0, anchorSplits[0].blockIdx);
-          const preText = preBlocks.map((b) => b.text).join('\n\n').trim();
-          if (preText.length > 50) {
-            const firstHeading = preBlocks.find((b) => b.headingLevel > 0)?.text;
-            chapters.push({
-              title: cleanChapterTitle(firstHeading || fileTocEntries[0]?.label || 'Mở đầu'),
-              content: preText,
-              wordCount: countWords(preText),
-            });
-          }
-        }
-
-        for (let s = 0; s < anchorSplits.length; s++) {
-          const start = anchorSplits[s].blockIdx;
-          const end = s + 1 < anchorSplits.length ? anchorSplits[s + 1].blockIdx : blocks.length;
-          const sliceBlocks = blocks.slice(start, end);
-          const sliceTitle = cleanChapterTitle(anchorSplits[s].label);
-          // Avoid repeating the title line if block[0] is identical heading
-          const contentBlocks =
-            sliceBlocks.length > 1 &&
-            sliceBlocks[0].text.trim().toLowerCase() === sliceTitle.toLowerCase()
-              ? sliceBlocks.slice(1)
-              : sliceBlocks;
-          const content = contentBlocks.map((b) => b.text).join('\n\n').trim() || sliceTitle;
-          chapters.push({
-            title: sliceTitle || `Chương ${chapters.length + 1}`,
-            content,
-            wordCount: countWords(content),
-          });
-        }
-        continue;
-      }
-    }
-
-    // Strategy 2: Check if this single spine file actually contains multiple chapters via chapter markers (RegEx)
-    const { rule: bestRule, testResult } = detectBestChapterRule(joinedText);
-    const allowNumericHere = spineItemRefs.length <= 3;
-    if (
-      testResult.isValid &&
-      testResult.matchCount >= 2 &&
-      (bestRule.id !== 'numeric-prefix' || allowNumericHere)
-    ) {
-      const candidateChapters = splitTextByRule(
-        joinedText,
-        bestRule.pattern,
-        bestRule.flags,
-        fileTocEntries[0]?.label || `Chương ${chapters.length + 1}`
-      );
-      if (isLikelyContentChapters(candidateChapters)) {
-        chapters.push(...candidateChapters);
-        continue;
-      }
-    }
-
-    // Strategy 3: Split by multiple <h1> (or <h2> if EPUB has very few spine files)
-    const headingSplitH1 = splitBlocksByHeadingLevel(
-      blocks,
-      1,
-      fileTocEntries[0]?.label || 'Mở đầu'
-    );
-    if (headingSplitH1) {
-      chapters.push(...headingSplitH1);
-      continue;
-    }
-
-    if (spineItemRefs.length <= 5) {
-      const headingSplitH2 = splitBlocksByHeadingLevel(
-        blocks,
-        2,
-        fileTocEntries[0]?.label || 'Mở đầu'
-      );
-      if (headingSplitH2) {
-        chapters.push(...headingSplitH2);
-        continue;
-      }
-    }
-
-    // Strategy 4: Standard single chapter per spine file
-    const firstHeadingBlock = blocks.find((b) => b.headingLevel > 0 && b.headingLevel <= 3);
-    const docTitleTag = doc.querySelector('title')?.textContent?.trim();
+    const firstHeadingText =
+      blocks.find((b) => b.headingLevel > 0 && b.headingLevel <= 3)?.text || '';
+    const docTitleTag = doc.querySelector('title')?.textContent?.trim() || '';
     const usableDocTitle =
       docTitleTag && docTitleTag.toLowerCase() !== title.toLowerCase() ? docTitleTag : '';
 
-    const chapterTitle = cleanChapterTitle(
-      fileTocEntries[0]?.label ||
-        firstHeadingBlock?.text ||
-        usableDocTitle ||
-        `Chương ${chapters.length + 1}`
-    );
-
-    const contentBlocks =
-      blocks.length > 1 &&
-      blocks[0].headingLevel > 0 &&
-      blocks[0].text.trim().toLowerCase() === chapterTitle.toLowerCase()
-        ? blocks.slice(1)
-        : blocks;
-
-    const cleanContent = contentBlocks.map((b) => b.text).join('\n\n').trim() || joinedText;
-
-    chapters.push({
-      title: chapterTitle,
-      wordCount: countWords(cleanContent),
-      content: cleanContent,
+    spineSections.push({
+      fileKey,
+      fileTocEntries,
+      blocks,
+      joinedText,
+      firstHeadingText,
+      usableDocTitle,
     });
+  }
+
+  const chapters: ParsedChapterDraft[] = [];
+  const fullBookText = rawSegments.join('\n\n').trim();
+
+  const appendLeadingTextToPrevChapter = (leadingText: string): boolean => {
+    const trimmed = leadingText.trim();
+    if (!trimmed || chapters.length === 0) return false;
+    const prev = chapters[chapters.length - 1];
+    prev.content = `${prev.content}\n\n${trimmed}`.trim();
+    prev.wordCount = countWords(prev.content);
+    return true;
+  };
+
+  // Detect whether this EPUB has an incomplete/missing TOC and splits chapters across XHTML files
+  const spineWithTocCount = spineSections.filter((s) => s.fileTocEntries.length > 0).length;
+  const hasFragmentToc = spineSections.some(
+    (s) => s.fileTocEntries.filter((e) => e.fragment).length >= 2
+  );
+
+  let wholeBookRegexChapters: ParsedChapterDraft[] | null = null;
+  if (fullBookText && !hasFragmentToc) {
+    const { rule: bestFullRule, testResult: fullTest } = detectBestChapterRule(fullBookText);
+    const allowNumeric = spineSections.length <= 3;
+    if (
+      fullTest.isValid &&
+      fullTest.matchCount >= 2 &&
+      (bestFullRule.id !== 'numeric-prefix' || allowNumeric)
+    ) {
+      const candidate = splitTextByRule(
+        fullBookText,
+        bestFullRule.pattern,
+        bestFullRule.flags,
+        title
+      );
+      if (isLikelyContentChapters(candidate)) {
+        wholeBookRegexChapters = candidate;
+      }
+    }
+  }
+
+  const tocIncomplete = tocEntries.length < 2 || spineWithTocCount < 2;
+  const coarseTocOverride =
+    wholeBookRegexChapters !== null &&
+    wholeBookRegexChapters.length >= Math.max(4, tocEntries.length * 2);
+
+  if (
+    wholeBookRegexChapters &&
+    ((tocIncomplete &&
+      (wholeBookRegexChapters.length >= Math.max(2, Math.floor(spineSections.length * 0.5)) ||
+        spineSections.length <= 5)) ||
+      coarseTocOverride)
+  ) {
+    chapters.push(...wholeBookRegexChapters);
+  } else {
+    for (let sIdx = 0; sIdx < spineSections.length; sIdx++) {
+      const sec = spineSections[sIdx];
+      const { fileTocEntries, blocks, joinedText, firstHeadingText, usableDocTitle } = sec;
+
+      // Strategy 1: Split a single HTML file by multiple TOC #fragment anchors
+      const fragmentEntries = fileTocEntries.filter((e) => e.fragment);
+      if (fragmentEntries.length >= 2) {
+        const anchorSplits: Array<{ blockIdx: number; label: string }> = [];
+        const seenBlockIdx = new Set<number>();
+
+        for (const entry of fragmentEntries) {
+          const blockIdx = blocks.findIndex((b) => b.anchorIds.includes(entry.fragment));
+          if (blockIdx !== -1 && !seenBlockIdx.has(blockIdx)) {
+            seenBlockIdx.add(blockIdx);
+            anchorSplits.push({ blockIdx, label: entry.label });
+          }
+        }
+
+        anchorSplits.sort((a, b) => a.blockIdx - b.blockIdx);
+
+        if (anchorSplits.length >= 2) {
+          if (anchorSplits[0].blockIdx > 0) {
+            const preBlocks = blocks.slice(0, anchorSplits[0].blockIdx);
+            const preText = preBlocks.map((b) => b.text).join('\n\n').trim();
+            if (preText) {
+              const firstPreHeading = preBlocks.find((b) => b.headingLevel > 0)?.text;
+              if (sIdx > 0 && chapters.length > 0 && !firstPreHeading) {
+                appendLeadingTextToPrevChapter(preText);
+              } else if (firstPreHeading || shouldIncludePreamble(preText)) {
+                chapters.push({
+                  title: cleanChapterTitle(
+                    firstPreHeading || fileTocEntries[0]?.label || 'Mở đầu'
+                  ),
+                  content: preText,
+                  wordCount: countWords(preText),
+                });
+              }
+            }
+          }
+
+          for (let s = 0; s < anchorSplits.length; s++) {
+            const start = anchorSplits[s].blockIdx;
+            const end = s + 1 < anchorSplits.length ? anchorSplits[s + 1].blockIdx : blocks.length;
+            const sliceBlocks = blocks.slice(start, end);
+            const sliceTitle = cleanChapterTitle(anchorSplits[s].label);
+            // Avoid repeating the title line if block[0] is identical heading
+            const contentBlocks =
+              sliceBlocks.length > 1 &&
+              sliceBlocks[0].text.trim().toLowerCase() === sliceTitle.toLowerCase()
+                ? sliceBlocks.slice(1)
+                : sliceBlocks;
+            const content = contentBlocks.map((b) => b.text).join('\n\n').trim() || sliceTitle;
+            chapters.push({
+              title: sliceTitle || `Chương ${chapters.length + 1}`,
+              content,
+              wordCount: countWords(content),
+            });
+          }
+          continue;
+        }
+      }
+
+      // Strategy 2: Check if this single spine file contains multiple chapters via chapter markers (RegEx)
+      const { rule: bestRule, testResult } = detectBestChapterRule(joinedText);
+      const allowNumericHere = spineSections.length <= 3;
+      if (
+        testResult.isValid &&
+        testResult.matchCount >= 2 &&
+        (bestRule.id !== 'numeric-prefix' || allowNumericHere)
+      ) {
+        // Inspect raw leading slice before first match so mid-book splits stitch seamlessly
+        const effFlags = ensureFlags(bestRule.flags);
+        let firstMatchIdx = -1;
+        try {
+          const rx = new RegExp(bestRule.pattern, effFlags);
+          const m = rx.exec(normalizeNewlines(joinedText));
+          if (m) {
+            const fm = m[0].trim();
+            firstMatchIdx = m.index + Math.max(0, m[0].indexOf(fm));
+          }
+        } catch {
+          // ignore
+        }
+
+        const leadingText = firstMatchIdx > 0 ? joinedText.slice(0, firstMatchIdx).trim() : '';
+        const tailText = firstMatchIdx > 0 ? joinedText.slice(firstMatchIdx) : joinedText;
+
+        const candidateChapters = splitTextByRule(
+          sIdx > 0 && chapters.length > 0 ? tailText : joinedText,
+          bestRule.pattern,
+          bestRule.flags,
+          fileTocEntries[0]?.label || `Chương ${chapters.length + 1}`
+        );
+        if (isLikelyContentChapters(candidateChapters)) {
+          if (sIdx > 0 && chapters.length > 0 && leadingText) {
+            appendLeadingTextToPrevChapter(leadingText);
+          }
+          chapters.push(...candidateChapters);
+          continue;
+        }
+      }
+
+      // Strategy 3: Split by multiple <h1> (or <h2> if EPUB has very few spine files)
+      const headingSplitH1 = splitBlocksByHeadingLevel(
+        blocks,
+        1,
+        fileTocEntries[0]?.label || 'Mở đầu'
+      );
+      if (headingSplitH1) {
+        if (sIdx > 0 && chapters.length > 0 && blocks[0]?.headingLevel !== 1) {
+          const firstH1Idx = blocks.findIndex((b) => b.headingLevel === 1);
+          if (firstH1Idx > 0) {
+            const preText = blocks.slice(0, firstH1Idx).map((b) => b.text).join('\n\n').trim();
+            appendLeadingTextToPrevChapter(preText);
+            const restH1 = splitBlocksByHeadingLevel(blocks.slice(firstH1Idx), 1, '');
+            if (restH1) {
+              chapters.push(...restH1);
+              continue;
+            }
+          }
+        }
+        chapters.push(...headingSplitH1);
+        continue;
+      }
+
+      if (spineSections.length <= 5) {
+        const headingSplitH2 = splitBlocksByHeadingLevel(
+          blocks,
+          2,
+          fileTocEntries[0]?.label || 'Mở đầu'
+        );
+        if (headingSplitH2) {
+          if (sIdx > 0 && chapters.length > 0 && blocks[0]?.headingLevel !== 2) {
+            const firstH2Idx = blocks.findIndex((b) => b.headingLevel > 0 && b.headingLevel <= 2);
+            if (firstH2Idx > 0) {
+              const preText = blocks.slice(0, firstH2Idx).map((b) => b.text).join('\n\n').trim();
+              appendLeadingTextToPrevChapter(preText);
+              const restH2 = splitBlocksByHeadingLevel(blocks.slice(firstH2Idx), 2, '');
+              if (restH2) {
+                chapters.push(...restH2);
+                continue;
+              }
+            }
+          }
+          chapters.push(...headingSplitH2);
+          continue;
+        }
+      }
+
+      // Strategy 4: Standard single chapter per spine file
+      const chapterTitle = cleanChapterTitle(
+        fileTocEntries[0]?.label ||
+          firstHeadingText ||
+          usableDocTitle ||
+          `Chương ${chapters.length + 1}`
+      );
+
+      const contentBlocks =
+        blocks.length > 1 &&
+        blocks[0].headingLevel > 0 &&
+        blocks[0].text.trim().toLowerCase() === chapterTitle.toLowerCase()
+          ? blocks.slice(1)
+          : blocks;
+
+      const cleanContent = contentBlocks.map((b) => b.text).join('\n\n').trim() || joinedText;
+
+      chapters.push({
+        title: chapterTitle,
+        wordCount: countWords(cleanContent),
+        content: cleanContent,
+      });
+    }
   }
 
   if (chapters.length === 0) {
@@ -1046,7 +1191,7 @@ export async function parseEpubFile(file: File): Promise<ParsedBookDraft> {
 
   const hasExtractedContent = chapters.some((c) => c.wordCount > 0);
   const rawText = hasExtractedContent
-    ? buildRawTextFromChapters(chapters)
+    ? fullBookText || buildRawTextFromChapters(chapters)
     : rawSegments.join('\n\n');
 
   return {
