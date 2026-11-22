@@ -148,9 +148,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-3">
                 <div>
                   <h3 className="font-semibold text-neutral-200 text-sm">Sao lưu & Khôi phục</h3>
-                  <p className="text-[11px] text-neutral-400 mt-0.5">
-                    Xuất hoặc nhập toàn bộ dữ liệu sách, dấu trang và từ điển.
-                  </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -215,7 +212,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-3">
               <div className="flex items-center justify-between mb-1">
                 <h4 className="font-semibold text-neutral-200">Phím tắt</h4>
-                <span className="text-[11px] text-neutral-400">Nhấn <kbd className="px-1 py-0.5 bg-neutral-800 rounded font-mono text-amber-400 font-bold">?</kbd> khi đọc để xem chi tiết</span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {[

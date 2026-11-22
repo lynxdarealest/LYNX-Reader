@@ -1020,10 +1020,9 @@ export const ImportModal: React.FC<ImportModalProps> = ({
 
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-neutral-400">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span>Hỗ trợ: Pixiv Series, Pixiv Novel, Syosetsu, Kakuyomu, trang web chữ</span>
                     {savedCookieInfo && (
                       <span className="px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-700/50 text-emerald-300 font-mono text-[10px]">
-                        Đã lưu {savedCookieInfo.count} cookies ({savedCookieInfo.domain})
+                        {savedCookieInfo.count} cookies ({savedCookieInfo.domain})
                       </span>
                     )}
                   </div>
@@ -1035,7 +1034,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                         className="flex items-center space-x-1 text-cyan-400 hover:text-cyan-300 font-medium cursor-pointer"
                       >
                         <Globe className="w-3.5 h-3.5" />
-                        <span>Mở trình duyệt (tự lưu Cookie)</span>
+                        <span>Mở trình duyệt</span>
                       </button>
                     )}
                     <button
@@ -1043,21 +1042,19 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                       onClick={() => setShowAdvancedWeb((prev) => !prev)}
                       className="text-amber-400 hover:text-amber-300 cursor-pointer"
                     >
-                      {showAdvancedWeb ? 'Ẩn tùy chọn Cookie' : 'Cookie (tùy chọn)'}
+                      {showAdvancedWeb ? 'Ẩn Cookie' : 'Cookie'}
                     </button>
                   </div>
                 </div>
 
                 {showAdvancedWeb && (
                   <div className="pt-2 border-t border-neutral-800 space-y-1.5">
-                    <label className="block text-[11px] text-neutral-400">
-                      Cookie Pixiv / trang web (tự động lưu lại theo tên miền cho các lần tải sau)
-                    </label>
+                    <label className="block text-[11px] text-neutral-400">Cookie</label>
                     <input
                       type="password"
                       value={webCookie}
                       onChange={(e) => setWebCookie(e.target.value)}
-                      placeholder="Nhập Cookie (tùy chọn)..."
+                      placeholder="Nhập Cookie..."
                       className="w-full px-3 py-1.5 bg-neutral-900 border border-neutral-800 rounded-lg text-xs text-neutral-200 font-mono focus:outline-none focus:border-amber-500"
                     />
                   </div>
@@ -1311,9 +1308,6 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               </div>
               <p className="text-sm font-semibold text-neutral-200 group-hover:text-amber-400">
                 Chọn file truyện hoặc kéo thả vào đây
-              </p>
-              <p className="text-neutral-500 text-[11px] mt-1 font-mono">
-                EPUB • TXT • FB2 • DOCX • Markdown • HTML
               </p>
             </div>
           ) : (

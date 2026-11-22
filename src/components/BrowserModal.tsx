@@ -549,7 +549,6 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
                     <Cookie className="w-4 h-4 text-amber-400" />
                     <span>Kho Cookies ({totalDomainsCount} trang)</span>
                   </div>
-                  <span className="text-[10px] text-emerald-400 font-mono">Tự lưu khi duyệt web</span>
                 </div>
 
                 {cookieFeedback && (
@@ -586,7 +585,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
                 <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
                   {cookieJars.filter((j) => j.cookies.length > 0).length === 0 ? (
                     <p className="text-neutral-500 text-[11px] text-center py-4">
-                      Chưa có cookie nào được lưu. Hãy truy cập hoặc đăng nhập một trang web ở bên dưới.
+                      Chưa có cookie nào.
                     </p>
                   ) : (
                     cookieJars
@@ -789,14 +788,6 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
               <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
                 <Globe className="w-7 h-7 text-amber-400" />
               </div>
-              <div className="space-y-1.5 max-w-lg">
-                <p className="text-sm font-semibold text-neutral-100">
-                  Trình duyệt WebView2 gốc (Tauri)
-                </p>
-                <p className="text-xs text-neutral-400 leading-relaxed">
-                  Cửa sổ trình duyệt gốc giúp đăng nhập Pixiv, vượt xác minh Cloudflare trực tiếp và tự động đồng bộ Cookie về ứng dụng.
-                </p>
-              </div>
               <div className="flex flex-wrap items-center justify-center gap-2.5">
                 <button
                   type="button"
@@ -834,19 +825,13 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
               <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-500 space-y-2">
                 <Globe className="w-10 h-10 text-neutral-700" />
                 <p className="text-sm font-medium text-neutral-300">Trình duyệt tích hợp</p>
-                <p className="text-xs max-w-md">
-                  Nhập địa chỉ URL trang web vào thanh địa chỉ ở trên để mở trực tiếp, vượt xác minh bảo mật và tự động lưu cookie.
-                </p>
               </div>
             )
           ) : proxyAvailable === false ? (
             <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-400 space-y-3">
               <AlertTriangle className="w-10 h-10 text-amber-500" />
               <p className="text-sm font-semibold text-neutral-200">
-                Bản đóng gói tĩnh từ <code className="text-amber-300">vite build</code> không có máy chủ proxy web
-              </p>
-              <p className="text-xs max-w-lg leading-relaxed text-neutral-400">
-                Khi đóng gói ứng dụng thành <code className="text-neutral-200">.exe</code> bằng Tauri hoặc bật máy chủ <code className="text-neutral-200">node server.ts</code>, bạn có thể duyệt web và tải truyện trực tiếp.
+                Không có máy chủ proxy web
               </p>
               {liveUrl && (
                 <a
@@ -875,9 +860,6 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
             <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-500 space-y-2">
               <Globe className="w-10 h-10 text-neutral-700" />
               <p className="text-sm font-medium text-neutral-300">Trình duyệt nội bộ</p>
-              <p className="text-xs max-w-md">
-                Nhập địa chỉ URL trang web vào thanh địa chỉ ở trên để duyệt web, đăng nhập và tự động lưu cookie theo tên miền.
-              </p>
             </div>
           )}
         </div>

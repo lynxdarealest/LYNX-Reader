@@ -134,11 +134,7 @@ export const ReaderBookmarks: React.FC<ReaderBookmarksProps> = ({
             {bookmarks.length === 0 ? (
               <div className="h-40 flex flex-col items-center justify-center text-center text-xs text-neutral-500">
                 <Bookmark className="w-8 h-8 text-neutral-700 mb-2" />
-                <p>Chưa có dấu trang nào được lưu.</p>
-                <p className="text-[11px] text-neutral-600 mt-1">
-                  Nhấn nút phía trên hoặc phím tắt{' '}
-                  <kbd className="px-1 py-0.5 bg-neutral-800 rounded font-mono text-neutral-400">B</kbd> khi đang đọc.
-                </p>
+                <p>Chưa có dấu trang nào.</p>
               </div>
             ) : (
               bookmarks.map((bm) => (
@@ -201,10 +197,7 @@ export const ReaderBookmarks: React.FC<ReaderBookmarksProps> = ({
           {highlights.length === 0 ? (
             <div className="h-44 flex flex-col items-center justify-center text-center text-xs text-neutral-500 px-4">
               <Highlighter className="w-8 h-8 text-neutral-700 mb-2" />
-              <p>Chưa có đoạn văn nào được tô sáng.</p>
-              <p className="text-[11px] text-neutral-600 mt-1">
-                Bôi đen đoạn văn bất kỳ khi đang đọc và chọn biểu tượng bút tô màu.
-              </p>
+              <p>Chưa có đoạn tô sáng nào.</p>
             </div>
           ) : (
             highlights.map((hl) => (

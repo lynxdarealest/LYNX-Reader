@@ -107,8 +107,7 @@ export const ShortcutHelpModal: React.FC<ShortcutHelpModalProps> = ({ isOpen, on
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between text-neutral-500 text-[11px]">
-          <span>Mẹo: Nhấn phím <kbd className="px-1 py-0.5 bg-neutral-800 rounded font-mono text-neutral-300">?</kbd> bất kỳ lúc nào khi đọc để mở bảng này.</span>
+        <div className="px-5 py-3 border-t border-neutral-800 bg-neutral-950 flex items-center justify-end">
           <button
             onClick={onClose}
             className="px-4 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-xs font-medium cursor-pointer"

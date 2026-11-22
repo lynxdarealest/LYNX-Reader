@@ -3130,7 +3130,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
               {settings.readingMode === 'focus' && paragraphs.length > 0 && (
                 <div className="mt-2 text-[11px] font-sans opacity-60">
-                  Chế độ Tập trung • Đoạn {Math.min(focusedParaIndex + 1, paragraphs.length)} / {paragraphs.length} (Nhấn vào đoạn hoặc phím J / K)
+                  Đoạn {Math.min(focusedParaIndex + 1, paragraphs.length)} / {paragraphs.length}
                 </div>
               )}
 
@@ -3205,12 +3205,6 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
                       >
                         Hủy
                       </button>
-                    </div>
-                  )}
-
-                  {isViewingTranslation && !isTranslating && (
-                    <div className="inline-flex items-center space-x-1 text-[11px] opacity-70">
-                      <span>Bôi đen cụm từ để chỉnh Name (Trung / Việt / Hán Việt / Eng) hoặc bấm Sửa</span>
                     </div>
                   )}
 

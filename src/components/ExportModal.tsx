@@ -123,36 +123,26 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <div className="grid grid-cols-2 gap-3">
               <div
                 onClick={() => setFormat('EPUB')}
-                className={`p-3 rounded-xl border cursor-pointer transition-all flex flex-col justify-between ${
+                className={`p-3 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
                   format === 'EPUB'
                     ? 'bg-amber-600/15 border-amber-500 text-amber-200 shadow-md'
                     : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
                 }`}
               >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="font-bold text-sm text-neutral-100">EPUB</span>
-                  <BookOpen className="w-4 h-4 text-amber-500" />
-                </div>
-                <p className="text-[11px] text-neutral-400">
-                  Sách điện tử chuẩn, giữ mục lục, đọc tốt trên mọi máy đọc sách.
-                </p>
+                <span className="font-bold text-sm text-neutral-100">EPUB</span>
+                <BookOpen className="w-4 h-4 text-amber-500" />
               </div>
 
               <div
                 onClick={() => setFormat('TXT')}
-                className={`p-3 rounded-xl border cursor-pointer transition-all flex flex-col justify-between ${
+                className={`p-3 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
                   format === 'TXT'
                     ? 'bg-amber-600/15 border-amber-500 text-amber-200 shadow-md'
                     : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
                 }`}
               >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="font-bold text-sm text-neutral-100">TXT</span>
-                  <FileText className="w-4 h-4 text-amber-500" />
-                </div>
-                <p className="text-[11px] text-neutral-400">
-                  Văn bản thuần UTF-8 BOM, nhẹ nhàng và tương thích điện thoại &amp; PC.
-                </p>
+                <span className="font-bold text-sm text-neutral-100">TXT</span>
+                <FileText className="w-4 h-4 text-amber-500" />
               </div>
             </div>
           </div>

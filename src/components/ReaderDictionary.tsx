@@ -241,11 +241,6 @@ export const ReaderDictionary: React.FC<ReaderDictionaryProps> = ({
             <span>Mọi truyện ({globalEntries.length})</span>
           </button>
         </div>
-        <p className="text-[10px] text-neutral-500 mt-1.5 px-1">
-          {activeScope === 'book'
-            ? 'Ưu tiên áp dụng cho truyện đang đọc (ghi đè mục trùng từ gốc ở phạm vi Mọi truyện).'
-            : 'Từ điển dùng chung cho toàn bộ truyện khi dịch và đọc.'}
-        </p>
       </div>
 
       {/* Top Bar: Add & Import/Export */}

@@ -7,8 +7,7 @@ import {
   Calendar,
   FileText,
   Check,
-  ArrowRight,
-  AlertCircle
+  ArrowRight
 } from 'lucide-react';
 import { Chapter, ChapterVersion } from '../types';
 import { getChapterVersions, deleteChapterVersion } from '../services/storage';
@@ -337,12 +336,7 @@ export const ChapterVersionModal: React.FC<ChapterVersionModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between">
-          <div className="text-xs text-neutral-400 flex items-center space-x-1.5">
-            <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-            <span>Khôi phục sẽ thay thế nội dung chương hiện tại bằng bản được chọn.</span>
-          </div>
-
+        <div className="px-5 py-3 border-t border-neutral-800 bg-neutral-950 flex items-center justify-end">
           <div className="flex items-center space-x-2">
             <button
               onClick={onClose}

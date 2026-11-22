@@ -108,12 +108,12 @@ export const ReaderSettingsPanel: React.FC<ReaderSettingsPanelProps> = ({
           <div className="grid grid-cols-2 gap-1.5">
             {(
               [
-                { id: 'scroll', label: 'Cuộn chương', desc: 'Cuộn dọc từng chương', icon: ScrollText },
-                { id: 'continuous', label: 'Cuộn liền mạch', desc: 'Tự nối tiếp chương', icon: ChevronsDown },
-                { id: 'paginated', label: 'Lật trang', desc: '1 trang vừa khung', icon: BookOpen },
-                { id: 'two-column', label: 'Sách 2 trang', desc: '2 cột như sách giấy', icon: Columns2 },
-                { id: 'focus', label: 'Tập trung', desc: 'Nổi bật từng đoạn', icon: Focus },
-              ] as Array<{ id: ReadingMode; label: string; desc: string; icon: React.ComponentType<{ className?: string }> }>
+                { id: 'scroll', label: 'Cuộn chương', icon: ScrollText },
+                { id: 'continuous', label: 'Cuộn liền mạch', icon: ChevronsDown },
+                { id: 'paginated', label: 'Lật trang', icon: BookOpen },
+                { id: 'two-column', label: 'Sách 2 trang', icon: Columns2 },
+                { id: 'focus', label: 'Tập trung', icon: Focus },
+              ] as Array<{ id: ReadingMode; label: string; icon: React.ComponentType<{ className?: string }> }>
             ).map((mode, idx) => {
               const Icon = mode.icon;
               const isSelected = settings.readingMode === mode.id;
@@ -122,7 +122,7 @@ export const ReaderSettingsPanel: React.FC<ReaderSettingsPanelProps> = ({
                   key={mode.id}
                   type="button"
                   onClick={() => onUpdateSettings({ readingMode: mode.id })}
-                  className={`flex items-start space-x-2 p-2 rounded-lg border text-left cursor-pointer transition-colors ${
+                  className={`flex items-center space-x-2 p-2 rounded-lg border text-left cursor-pointer transition-colors ${
                     idx === 4 ? 'col-span-2' : ''
                   } ${
                     isSelected
@@ -130,11 +130,8 @@ export const ReaderSettingsPanel: React.FC<ReaderSettingsPanelProps> = ({
                       : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:border-neutral-700 hover:text-white'
                   }`}
                 >
-                  <Icon className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${isSelected ? 'text-amber-400' : 'text-neutral-400'}`} />
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-semibold leading-tight">{mode.label}</div>
-                    <div className="text-[10px] text-neutral-500 leading-tight mt-0.5 truncate">{mode.desc}</div>
-                  </div>
+                  <Icon className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-amber-400' : 'text-neutral-400'}`} />
+                  <span className="text-[11px] font-semibold leading-tight truncate">{mode.label}</span>
                 </button>
               );
             })}

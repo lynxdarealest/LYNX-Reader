@@ -164,13 +164,13 @@ export const ReaderSearch: React.FC<ReaderSearchProps> = ({
 
       {/* Results List */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        <div className="text-[11px] text-neutral-500 font-medium">
-          {results.length > 0
-            ? `Tìm thấy ${results.length} kết quả:`
-            : searchQuery && !isSearching
-            ? 'Không tìm thấy kết quả phù hợp.'
-            : 'Nhập từ khóa và nhấn Enter để tìm.'}
-        </div>
+        {(results.length > 0 || (searchQuery && !isSearching)) && (
+          <div className="text-[11px] text-neutral-500 font-medium">
+            {results.length > 0
+              ? `Tìm thấy ${results.length} kết quả:`
+              : 'Không tìm thấy kết quả phù hợp.'}
+          </div>
+        )}
 
         {results.map((res, i) => (
           <div
