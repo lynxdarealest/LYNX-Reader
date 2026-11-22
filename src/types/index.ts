@@ -1,6 +1,6 @@
 export type BookStatus = 'unread' | 'reading' | 'completed' | 'favorite' | 'archived';
 
-export type BookFormat = 'TXT' | 'EPUB' | 'HTML' | 'MD' | 'WEB';
+export type BookFormat = 'TXT' | 'EPUB' | 'FB2' | 'DOCX' | 'HTML' | 'MD' | 'WEB';
 
 export interface Book {
   id: string;
@@ -19,7 +19,7 @@ export interface Book {
   fileSize: number;
   sourceFileName: string;
   sourceUrl?: string;
-  rawTextBackup?: string; // Cached raw text for TXT/WEB files to allow re-parsing chapters anytime
+  rawTextBackup?: string; // Cached raw text for all formats to allow re-parsing chapters anytime
   tags: string[];
 }
 

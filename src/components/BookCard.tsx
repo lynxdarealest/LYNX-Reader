@@ -66,6 +66,8 @@ export const BookCard: React.FC<BookCardProps> = ({
   const formatBadgeColors: Record<string, string> = {
     TXT: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
     EPUB: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
+    FB2: 'bg-violet-500/20 text-violet-400 border-violet-500/30',
+    DOCX: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
     HTML: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
     MD: 'bg-sky-500/20 text-sky-400 border-sky-500/30',
     WEB: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',

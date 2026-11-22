@@ -34,9 +34,13 @@ import {
   readFileAsText,
   splitTextByRule,
   testRegexPattern,
+  detectBestChapterRule,
   parseEpubFile,
+  parseFb2File,
+  parseDocxFile,
   parseHtmlOrMdFile,
   countWords,
+  ParsedChapterDraft,
   RegexTestResult,
 } from '../services/parser';
 import {
@@ -102,18 +106,18 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   const [coverUrl, setCoverUrl] = React.useState<string>('');
   const [sourceUrl, setSourceUrl] = React.useState<string>('');
 
-  // TXT-specific state
+  // Text & Chapter splitting state (works for TXT, EPUB, FB2, DOCX, HTML, MD, WEB)
   const [rawTextContent, setRawTextContent] = React.useState<string>('');
   const [selectedEncoding, setSelectedEncoding] = React.useState('auto');
   const [selectedRuleId, setSelectedRuleId] = React.useState(DEFAULT_CHAPTER_RULES[0].id);
   const [customRegexPattern, setCustomRegexPattern] = React.useState(DEFAULT_CHAPTER_RULES[0].pattern);
-  const [customRegexFlags, setCustomRegexFlags] = React.useState('gi');
+  const [customRegexFlags, setCustomRegexFlags] = React.useState('gim');
   const [regexTestResult, setRegexTestResult] = React.useState<RegexTestResult | null>(null);
+  const [structuralChapters, setStructuralChapters] = React.useState<ParsedChapterDraft[] | null>(null);
+  const [splitMode, setSplitMode] = React.useState<'structure' | 'regex'>('regex');
 
   // Chapters list
-  const [draftChapters, setDraftChapters] = React.useState<
-    Array<{ title: string; wordCount: number; content: string }>
-  >([]);
+  const [draftChapters, setDraftChapters] = React.useState<ParsedChapterDraft[]>([]);
 
   // Editing single chapter
   const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
@@ -146,6 +150,9 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       setSelectedFile(null);
       setRawTextContent('');
       setDraftChapters([]);
+      setStructuralChapters(null);
+      setSplitMode('regex');
+      setRegexTestResult(null);
       setDraftTranslations({});
       setIsTranslatingDraft(false);
       setDraftTranslateProgress(null);
@@ -213,6 +220,10 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     setSelectedFile(file);
     setIsProcessing(true);
     setErrorMessage(null);
+    setStructuralChapters(null);
+    setCoverUrl('');
+    setBookAuthor('');
+    setBookDescription('');
 
     const ext = file.name.split('.').pop()?.toLowerCase();
     const cleanName = file.name.replace(/\.[^/.]+$/, '');
@@ -227,18 +238,90 @@ export const ImportModal: React.FC<ImportModalProps> = ({
         setBookDescription(parsed.description);
         if (parsed.coverUrl) setCoverUrl(parsed.coverUrl);
         setDraftChapters(parsed.chapters);
+        setStructuralChapters(parsed.chapters);
+        setSplitMode('structure');
+        const raw = parsed.rawText || '';
+        setRawTextContent(raw);
+        if (raw) {
+          const detected = detectBestChapterRule(raw);
+          setSelectedRuleId(detected.rule.id);
+          setCustomRegexPattern(detected.rule.pattern);
+          setCustomRegexFlags(detected.rule.flags);
+          setRegexTestResult(detected.testResult);
+        } else {
+          setRegexTestResult(null);
+        }
+      } else if (ext === 'fb2') {
+        setBookFormat('FB2');
+        const parsed = await parseFb2File(file);
+        setBookTitle(parsed.title);
+        setBookAuthor(parsed.author);
+        setBookDescription(parsed.description);
+        if (parsed.coverUrl) setCoverUrl(parsed.coverUrl);
+        setDraftChapters(parsed.chapters);
+        setStructuralChapters(parsed.chapters);
+        setSplitMode('structure');
+        const raw = parsed.rawText || '';
+        setRawTextContent(raw);
+        if (raw) {
+          const detected = detectBestChapterRule(raw);
+          setSelectedRuleId(detected.rule.id);
+          setCustomRegexPattern(detected.rule.pattern);
+          setCustomRegexFlags(detected.rule.flags);
+          setRegexTestResult(detected.testResult);
+        } else {
+          setRegexTestResult(null);
+        }
+      } else if (ext === 'docx') {
+        setBookFormat('DOCX');
+        const parsed = await parseDocxFile(file);
+        setBookTitle(parsed.title);
+        setBookAuthor(parsed.author);
+        setBookDescription(parsed.description);
+        setDraftChapters(parsed.chapters);
+        setStructuralChapters(parsed.structuralSplitUsed ? parsed.chapters : null);
+        setSplitMode(parsed.structuralSplitUsed ? 'structure' : 'regex');
+        const raw = parsed.rawText || '';
+        setRawTextContent(raw);
+        if (raw) {
+          const detected = detectBestChapterRule(raw);
+          setSelectedRuleId(detected.rule.id);
+          setCustomRegexPattern(detected.rule.pattern);
+          setCustomRegexFlags(detected.rule.flags);
+          setRegexTestResult(detected.testResult);
+        } else {
+          setRegexTestResult(null);
+        }
       } else if (ext === 'md' || ext === 'html' || ext === 'htm') {
         setBookFormat(ext === 'md' ? 'MD' : 'HTML');
-        const parsed = await parseHtmlOrMdFile(file);
+        const parsed = await parseHtmlOrMdFile(file, selectedEncoding);
+        setBookTitle(parsed.title);
         setDraftChapters(parsed.chapters);
+        setStructuralChapters(parsed.structuralSplitUsed ? parsed.chapters : null);
+        setSplitMode(parsed.structuralSplitUsed ? 'structure' : 'regex');
+        const raw = parsed.rawText || '';
+        setRawTextContent(raw);
+        if (raw) {
+          const detected = detectBestChapterRule(raw);
+          setSelectedRuleId(parsed.detectedRuleId || detected.rule.id);
+          setCustomRegexPattern(detected.rule.pattern);
+          setCustomRegexFlags(detected.rule.flags);
+          setRegexTestResult(detected.testResult);
+        } else {
+          setRegexTestResult(null);
+        }
       } else {
         // TXT file
         setBookFormat('TXT');
         const text = await readFileAsText(file, selectedEncoding);
         setRawTextContent(text);
-        const testRes = testRegexPattern(customRegexPattern, customRegexFlags, text);
-        setRegexTestResult(testRes);
-        const chapters = splitTextByRule(text, customRegexPattern, customRegexFlags, cleanName);
+        const detected = detectBestChapterRule(text);
+        setSelectedRuleId(detected.rule.id);
+        setCustomRegexPattern(detected.rule.pattern);
+        setCustomRegexFlags(detected.rule.flags);
+        setRegexTestResult(detected.testResult);
+        setSplitMode('regex');
+        const chapters = splitTextByRule(text, detected.rule.pattern, detected.rule.flags, cleanName);
         setDraftChapters(chapters);
       }
     } catch (err: any) {
@@ -248,17 +331,31 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     }
   };
 
+  const handleRestoreStructuralSplit = () => {
+    if (!structuralChapters || structuralChapters.length === 0) return;
+    setSplitMode('structure');
+    setDraftChapters(structuralChapters);
+    setDraftTranslations({});
+    setPreviewTranslatedInModal(false);
+  };
+
+  const handleApplyRegexSplit = (pat = customRegexPattern, flags = customRegexFlags) => {
+    if (!rawTextContent) return;
+    setSplitMode('regex');
+    const res = testRegexPattern(pat, flags, rawTextContent);
+    setRegexTestResult(res);
+    if (res.isValid) {
+      const chapters = splitTextByRule(rawTextContent, pat, flags, bookTitle);
+      setDraftChapters(chapters);
+      setDraftTranslations({});
+      setPreviewTranslatedInModal(false);
+    }
+  };
+
   const handlePatternChange = (pat: string) => {
     setCustomRegexPattern(pat);
     if (rawTextContent) {
-      const res = testRegexPattern(pat, customRegexFlags, rawTextContent);
-      setRegexTestResult(res);
-      if (res.isValid) {
-        const chapters = splitTextByRule(rawTextContent, pat, customRegexFlags, bookTitle);
-        setDraftChapters(chapters);
-        setDraftTranslations({});
-        setPreviewTranslatedInModal(false);
-      }
+      handleApplyRegexSplit(pat, customRegexFlags);
     }
   };
 
@@ -269,21 +366,39 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       setCustomRegexPattern(rule.pattern);
       setCustomRegexFlags(rule.flags);
       if (rawTextContent) {
-        const res = testRegexPattern(rule.pattern, rule.flags, rawTextContent);
-        setRegexTestResult(res);
-        if (res.isValid) {
-          const chapters = splitTextByRule(rawTextContent, rule.pattern, rule.flags, bookTitle);
-          setDraftChapters(chapters);
-          setDraftTranslations({});
-          setPreviewTranslatedInModal(false);
-        }
+        handleApplyRegexSplit(rule.pattern, rule.flags);
       }
     }
   };
 
   const handleEncodingChange = async (enc: string) => {
     setSelectedEncoding(enc);
-    if (selectedFile && bookFormat === 'TXT') {
+    if (!selectedFile) return;
+
+    if (bookFormat === 'HTML' || bookFormat === 'MD') {
+      setIsProcessing(true);
+      try {
+        const parsed = await parseHtmlOrMdFile(selectedFile, enc);
+        const raw = parsed.rawText || '';
+        setRawTextContent(raw);
+        setStructuralChapters(parsed.structuralSplitUsed ? parsed.chapters : null);
+        setSplitMode(parsed.structuralSplitUsed ? 'structure' : 'regex');
+        setDraftChapters(parsed.chapters);
+        if (raw) {
+          const res = testRegexPattern(customRegexPattern, customRegexFlags, raw);
+          setRegexTestResult(res);
+        }
+        setDraftTranslations({});
+        setPreviewTranslatedInModal(false);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Lỗi bảng mã.');
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
+
+    if (bookFormat === 'TXT') {
       setIsProcessing(true);
       try {
         const text = await readFileAsText(selectedFile, enc);
@@ -1183,7 +1298,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".txt,.epub,.md,.html,.htm"
+                accept=".txt,.epub,.fb2,.docx,.md,.html,.htm"
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files && e.target.files[0]) {
@@ -1198,7 +1313,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                 Chọn file truyện hoặc kéo thả vào đây
               </p>
               <p className="text-neutral-500 text-[11px] mt-1 font-mono">
-                TXT • EPUB • Markdown • HTML
+                EPUB • TXT • FB2 • DOCX • Markdown • HTML
               </p>
             </div>
           ) : (
@@ -1274,29 +1389,67 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                 />
               </div>
 
-              {/* TXT / Web Chapter Separation Controls */}
-              {(bookFormat === 'TXT' || (bookFormat === 'WEB' && rawTextContent)) && (
+              {/* Universal Chapter Separation Controls (EPUB, FB2, DOCX, HTML, MD, TXT, WEB) */}
+              {rawTextContent && (
                 <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center space-x-2 font-semibold text-neutral-200">
                       <Scissors className="w-3.5 h-3.5 text-amber-500" />
-                      <span>Quy tắc tách chương</span>
+                      <span>Tách chương tự động</span>
+                      {structuralChapters && structuralChapters.length > 0 && (
+                        <span className="text-[10px] font-normal px-2 py-0.5 rounded bg-neutral-800 text-neutral-300">
+                          {splitMode === 'structure'
+                            ? `Đang dùng cấu trúc ${bookFormat}`
+                            : 'Đang tách theo RegEx'}
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center space-x-2">
-                      <span className="text-neutral-400 text-[11px]">Bảng mã:</span>
-                      <select
-                        value={selectedEncoding}
-                        onChange={(e) => handleEncodingChange(e.target.value)}
-                        className="bg-neutral-900 border border-neutral-700 text-neutral-200 rounded px-2 py-0.5 text-xs focus:outline-none"
-                      >
-                        <option value="auto">Tự động</option>
-                        <option value="utf-8">UTF-8</option>
-                        <option value="windows-1258">Windows-1258 (Tiếng Việt)</option>
-                        <option value="utf-16le">UTF-16 LE</option>
-                        <option value="gbk">GBK</option>
-                        <option value="big5">Big5</option>
-                      </select>
+                      {structuralChapters && structuralChapters.length > 0 && (
+                        <div className="inline-flex items-center rounded-md border border-neutral-800 bg-neutral-900 p-0.5 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={handleRestoreStructuralSplit}
+                            className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                              splitMode === 'structure'
+                                ? 'bg-amber-600 text-white font-medium'
+                                : 'text-neutral-400 hover:text-neutral-200'
+                            }`}
+                          >
+                            Cấu trúc gốc ({structuralChapters.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleApplyRegexSplit()}
+                            className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                              splitMode === 'regex'
+                                ? 'bg-amber-600 text-white font-medium'
+                                : 'text-neutral-400 hover:text-neutral-200'
+                            }`}
+                          >
+                            Theo RegEx
+                          </button>
+                        </div>
+                      )}
+
+                      {(bookFormat === 'TXT' || bookFormat === 'HTML' || bookFormat === 'MD') && (
+                        <div className="flex items-center space-x-1.5">
+                          <span className="text-neutral-400 text-[11px]">Bảng mã:</span>
+                          <select
+                            value={selectedEncoding}
+                            onChange={(e) => handleEncodingChange(e.target.value)}
+                            className="bg-neutral-900 border border-neutral-700 text-neutral-200 rounded px-2 py-0.5 text-xs focus:outline-none"
+                          >
+                            <option value="auto">Tự động</option>
+                            <option value="utf-8">UTF-8</option>
+                            <option value="windows-1258">Windows-1258 (Tiếng Việt)</option>
+                            <option value="utf-16le">UTF-16 LE</option>
+                            <option value="gbk">GBK</option>
+                            <option value="big5">Big5</option>
+                          </select>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1332,19 +1485,32 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                   {/* Regex Diagnostics Preview */}
                   {regexTestResult && (
                     <div className="p-2.5 bg-neutral-900 rounded-lg border border-neutral-800 text-[11px] space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-neutral-400">Kết quả phân tích mẫu:</span>
-                        <span
-                          className={`font-mono font-bold px-2 py-0.5 rounded ${
-                            regexTestResult.isValid && regexTestResult.matchCount > 0
-                              ? 'bg-emerald-500/20 text-emerald-400'
-                              : 'bg-red-500/20 text-red-400'
-                          }`}
-                        >
-                          {regexTestResult.isValid
-                            ? `Tìm thấy ${regexTestResult.matchCount} chương`
-                            : regexTestResult.error}
-                        </span>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-neutral-400">Kết quả nhận diện RegEx:</span>
+                        <div className="flex items-center space-x-2">
+                          <span
+                            className={`font-mono font-bold px-2 py-0.5 rounded ${
+                              regexTestResult.isValid && regexTestResult.matchCount > 0
+                                ? 'bg-emerald-500/20 text-emerald-400'
+                                : 'bg-red-500/20 text-red-400'
+                            }`}
+                          >
+                            {regexTestResult.isValid
+                              ? `Tìm thấy ${regexTestResult.matchCount} chương`
+                              : regexTestResult.error}
+                          </span>
+                          {splitMode === 'structure' &&
+                            regexTestResult.isValid &&
+                            regexTestResult.matchCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => handleApplyRegexSplit()}
+                                className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-medium cursor-pointer transition-colors"
+                              >
+                                Áp dụng tách lại
+                              </button>
+                            )}
+                        </div>
                       </div>
 
                       {regexTestResult.sampleMatches.length > 0 && (

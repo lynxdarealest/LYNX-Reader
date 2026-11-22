@@ -19,6 +19,7 @@ import {
   DEFAULT_CHAPTER_RULES,
   testRegexPattern,
   splitTextByRule,
+  detectBestChapterRule,
   countWords,
   RegexTestResult,
 } from '../services/parser';
@@ -42,7 +43,7 @@ export const ChapterManagerModal: React.FC<ChapterManagerModalProps> = ({
   const [draftChapters, setDraftChapters] = React.useState<Chapter[]>([]);
   const [selectedRuleId, setSelectedRuleId] = React.useState<string>(DEFAULT_CHAPTER_RULES[0].id);
   const [customPattern, setCustomPattern] = React.useState<string>(DEFAULT_CHAPTER_RULES[0].pattern);
-  const [customFlags, setCustomFlags] = React.useState<string>('gi');
+  const [customFlags, setCustomFlags] = React.useState<string>('gim');
   const [testResult, setTestResult] = React.useState<RegexTestResult | null>(null);
   const [activeTab, setActiveTab] = React.useState<'list' | 'resplit'>('list');
 
@@ -74,10 +75,13 @@ export const ChapterManagerModal: React.FC<ChapterManagerModalProps> = ({
       setSplitError(null);
       setActiveTab('list');
 
-      // Test default regex on full content if available
+      // Auto-detect best chapter rule on full content
       const fullText = book.rawTextBackup || chapters.map((c) => `${c.title}\n${c.content}`).join('\n\n');
-      const res = testRegexPattern(customPattern, customFlags, fullText);
-      setTestResult(res);
+      const detected = detectBestChapterRule(fullText);
+      setSelectedRuleId(detected.rule.id);
+      setCustomPattern(detected.rule.pattern);
+      setCustomFlags(detected.rule.flags);
+      setTestResult(detected.testResult);
     }
   }, [isOpen, chapters, book]);
 
