@@ -1,11 +1,14 @@
-<div align="center">
+# LYNX Reader
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+## Windows releases and auto-updates
 
-  <h1>Built with AI Studio</h2>
+The Windows installer checks the public GitHub Releases page when LYNX Reader starts. It downloads available updates automatically and installs them after LYNX Reader exits.
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+To publish an update, push a version tag such as `v0.1.1`:
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+```powershell
+git tag v0.1.1
+git push origin v0.1.1
+```
 
-</div>
+GitHub Actions builds the NSIS installer and publishes it with the update metadata. Keep releases public so installed copies can download them. The first release is `v0.1.0`; later releases must use a higher version.

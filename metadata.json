@@ -1,0 +1,6 @@
+{
+  "name": "LYNX Reader",
+  "description": "LYNX Reader - Ứng dụng đọc truyện chữ local-first chuyên nghiệp cho Windows. Hỗ trợ TXT, EPUB, Web, tự động tách chương, đọc TTS, dịch truyện và từ điển riêng.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
