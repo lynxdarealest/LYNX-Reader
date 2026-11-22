@@ -53,20 +53,8 @@ jobs:
             Write-Error "Release tag must look like v0.1.2; received '$tag'."
             exit 1
           }
-          $version = $tag.Substring(1)
-          node -e "
-            const fs = require('fs');
-            const v = '$version';
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = v;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-            conf.version = v;
-            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
-            let cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
-            cargo = cargo.replace(/^version\s*=\s*\"[^\"]+\"/m, 'version = \"' + v + '\"');
-            fs.writeFileSync('src-tauri/Cargo.toml', cargo);
-          "
+          $env:APP_VERSION = $tag.Substring(1)
+          'const fs=require("fs"),v=process.env.APP_VERSION;for(const p of["package.json","src-tauri/tauri.conf.json"]){const j=JSON.parse(fs.readFileSync(p,"utf8"));j.version=v;fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n")}const c=fs.readFileSync("src-tauri/Cargo.toml","utf8").replace(/^version\s*=\s*"[^"]+"/m,"version = \""+v+"\"");fs.writeFileSync("src-tauri/Cargo.toml",c);' | node
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows Tauri installer
