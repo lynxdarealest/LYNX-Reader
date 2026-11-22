@@ -1,14 +1,15 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use regex::Regex;
 use reqwest::header::{
-    HeaderMap, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, COOKIE, ORIGIN, REFERER, SET_COOKIE,
-    USER_AGENT,
+    HeaderMap, ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, COOKIE, LOCATION, ORIGIN, REFERER,
+    SET_COOKIE, USER_AGENT,
 };
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::webview::PageLoadEvent;
@@ -156,6 +157,90 @@ fn extract_base_domain(url_or_host: &str) -> String {
     last_two
 }
 
+fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    if o[0] == 0 {
+        return true; // 0.0.0.0/8
+    }
+    if o[0] == 10 {
+        return true; // 10.0.0.0/8
+    }
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return true; // 100.64.0.0/10 CGNAT
+    }
+    if o[0] == 127 {
+        return true; // 127.0.0.0/8 loopback
+    }
+    if o[0] == 169 && o[1] == 254 {
+        return true; // 169.254.0.0/16 link-local & cloud metadata
+    }
+    if o[0] == 172 && (16..=31).contains(&o[1]) {
+        return true; // 172.16.0.0/12
+    }
+    if o[0] == 192 && o[1] == 0 && (o[2] == 0 || o[2] == 2) {
+        return true; // 192.0.0.0/24 & TEST-NET-1
+    }
+    if o[0] == 192 && o[1] == 168 {
+        return true; // 192.168.0.0/16
+    }
+    if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+        return true; // 198.18.0.0/15
+    }
+    if o[0] == 198 && o[1] == 51 && o[2] == 100 {
+        return true; // TEST-NET-2
+    }
+    if o[0] == 203 && o[1] == 0 && o[2] == 113 {
+        return true; // TEST-NET-3
+    }
+    if o[0] >= 224 {
+        return true; // multicast, reserved, broadcast
+    }
+    false
+}
+
+fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return true;
+    }
+    let s = ip.segments();
+    // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 (stable across all Rust toolchains)
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && (s[5] == 0xffff || s[5] == 0) {
+        let embedded = Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        );
+        if is_blocked_ipv4(embedded) {
+            return true;
+        }
+    }
+    // fc00::/7 (unique local)
+    if (s[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    // fe80::/10 (link-local) & fec0::/10 (site-local)
+    if (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
+        return true;
+    }
+    // 64:ff9b::/96 & 64:ff9b:1::/48 (NAT64)
+    if s[0] == 0x0064 && s[1] == 0xff9b && ((s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0) || s[2] == 1) {
+        return true;
+    }
+    // 100::/64 (discard) & 2001:db8::/32 (documentation)
+    if (s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0) || (s[0] == 0x2001 && s[1] == 0x0db8) {
+        return true;
+    }
+    false
+}
+
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        IpAddr::V6(v6) => is_blocked_ipv6(v6),
+    }
+}
+
 fn assert_public_http_url(raw_url: &str) -> Result<Url, String> {
     let parsed = Url::parse(raw_url.trim())
         .map_err(|_| "URL không hợp lệ. Vui lòng nhập đầy đủ http:// hoặc https://".to_string())?;
@@ -163,7 +248,105 @@ fn assert_public_http_url(raw_url: &str) -> Result<Url, String> {
     if scheme != "http" && scheme != "https" {
         return Err("Chỉ hỗ trợ giao thức HTTP và HTTPS.".to_string());
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Không hỗ trợ URL chứa thông tin đăng nhập trực tiếp (user:pass@).".to_string());
+    }
+    let raw_host = parsed
+        .host_str()
+        .ok_or_else(|| "URL thiếu tên máy chủ hợp lệ.".to_string())?;
+    let host = raw_host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_lowercase();
+
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".home.arpa")
+    {
+        return Err("Không được phép truy cập địa chỉ cục bộ hoặc mạng nội bộ.".to_string());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_blocked_ip(ip) {
+            return Err("Không được phép truy cập địa chỉ IP nội bộ, loopback hoặc link-local.".to_string());
+        }
+        return Ok(parsed);
+    }
+
+    if !host.contains('.') {
+        return Err("Không được phép truy cập tên máy chủ nội bộ không có tên miền công khai.".to_string());
+    }
+
     Ok(parsed)
+}
+
+async fn assert_public_http_url_resolved(raw_url: &str) -> Result<Url, String> {
+    let parsed = assert_public_http_url(raw_url)?;
+    let raw_host = parsed.host_str().unwrap_or("");
+    let host = raw_host.trim_matches(|c| c == '[' || c == ']').to_string();
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(parsed);
+    }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|_| {
+            format!(
+                "Không thể phân giải tên miền \"{host}\". Vui lòng kiểm tra lại địa chỉ hoặc kết nối mạng."
+            )
+        })?;
+    let mut count = 0usize;
+    for addr in addrs {
+        count += 1;
+        if is_blocked_ip(addr.ip()) {
+            return Err(format!(
+                "Tên miền \"{host}\" phân giải tới địa chỉ mạng nội bộ/riêng tư nên đã bị chặn."
+            ));
+        }
+    }
+    if count == 0 {
+        return Err(format!("Tên miền \"{host}\" không trả về địa chỉ mạng hợp lệ."));
+    }
+    Ok(parsed)
+}
+
+fn is_cookie_domain_allowed(req_host: &str, cookie_domain: &str) -> bool {
+    let r = req_host
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_lowercase();
+    let d = cookie_domain
+        .trim()
+        .trim_start_matches('.')
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_lowercase();
+    if r.is_empty() || d.is_empty() {
+        return false;
+    }
+    if r.parse::<IpAddr>().is_ok() || d.parse::<IpAddr>().is_ok() {
+        return r == d;
+    }
+    if !d.contains('.') || TWO_PART_TLDS.contains(&d.as_str()) {
+        return false;
+    }
+    r == d || r.ends_with(&format!(".{d}"))
+}
+
+fn is_cookie_path_match(pathname: &str, cookie_path: &str) -> bool {
+    let c_path = if cookie_path.is_empty() { "/" } else { cookie_path };
+    if c_path == "/" {
+        return true;
+    }
+    if pathname == c_path {
+        return true;
+    }
+    let prefix = if c_path.ends_with('/') {
+        c_path.to_string()
+    } else {
+        format!("{c_path}/")
+    };
+    pathname.starts_with(&prefix)
 }
 
 fn load_cookies_from_disk(path: &PathBuf) -> HashMap<String, SiteCookieJar> {
@@ -224,14 +407,26 @@ fn upsert_cookie_entry(
     if base_domain.is_empty() || entry.name.is_empty() {
         return;
     }
+    let current = now_ms();
+    if entry.expires_at.map(|e| e <= current).unwrap_or(false) {
+        if let Some(jar) = map.get_mut(base_domain) {
+            jar.cookies
+                .retain(|c| !(c.name == entry.name && c.domain == entry.domain && c.path == entry.path));
+            jar.updated_at = current;
+            if jar.cookies.is_empty() {
+                map.remove(base_domain);
+            }
+        }
+        return;
+    }
     let jar = map
         .entry(base_domain.to_string())
         .or_insert_with(|| SiteCookieJar {
             domain: base_domain.to_string(),
             cookies: Vec::new(),
-            updated_at: now_ms(),
+            updated_at: current,
         });
-    jar.updated_at = now_ms();
+    jar.updated_at = current;
     if let Some(existing) = jar
         .cookies
         .iter_mut()
@@ -257,7 +452,8 @@ async fn merge_set_cookies_from_headers(
         return;
     }
 
-    let req_host = request_url.host_str().unwrap_or("");
+    let req_host = request_url.host_str().unwrap_or("").to_lowercase();
+    let is_https = request_url.scheme() == "https";
     let mut map = state.cookies_by_domain.lock().await;
     let current = now_ms();
 
@@ -275,18 +471,20 @@ async fn merge_set_cookies_from_headers(
             continue;
         }
 
-        let mut domain = req_host.to_string();
+        let mut domain = req_host.clone();
+        let mut has_explicit_domain = false;
         let mut path = "/".to_string();
         let mut expires_at: Option<u64> = None;
         let mut http_only = false;
-        let mut secure = request_url.scheme() == "https";
+        let mut secure = false;
 
         for attr in parts.iter().skip(1) {
             if let Some(a_eq) = attr.find('=') {
                 let k = attr[..a_eq].trim().to_lowercase();
                 let v = attr[a_eq + 1..].trim();
                 if k == "domain" && !v.is_empty() {
-                    domain = v.trim_start_matches('.').to_string();
+                    domain = v.trim_start_matches('.').to_lowercase();
+                    has_explicit_domain = true;
                 } else if k == "path" && !v.is_empty() {
                     path = if v.starts_with('/') {
                         v.to_string()
@@ -310,6 +508,18 @@ async fn merge_set_cookies_from_headers(
                     secure = true;
                 }
             }
+        }
+
+        if has_explicit_domain && !is_cookie_domain_allowed(&req_host, &domain) {
+            continue;
+        }
+        if name.starts_with("__Secure-") && (!is_https || !secure) {
+            continue;
+        }
+        if name.starts_with("__Host-")
+            && (!is_https || !secure || has_explicit_domain || path != "/")
+        {
+            continue;
         }
 
         let base_domain = extract_base_domain(&domain);
@@ -369,7 +579,12 @@ async fn build_cookie_header_for_url(
     app: &AppHandle,
     state: &AppState,
 ) -> Option<String> {
+    if target_url.scheme() != "http" && target_url.scheme() != "https" {
+        return None;
+    }
     let host = target_url.host_str().unwrap_or("").to_lowercase();
+    let pathname = target_url.path();
+    let is_https = target_url.scheme() == "https";
     let base_domain = extract_base_domain(&host);
     let current = now_ms();
     let mut cookie_map: HashMap<String, String> = HashMap::new();
@@ -378,6 +593,9 @@ async fn build_cookie_header_for_url(
     if let Some(browser_win) = app.get_webview_window("reader-browser") {
         if let Ok(wv_cookies) = browser_win.cookies_for_url(target_url.clone()) {
             for c in wv_cookies {
+                if c.secure().unwrap_or(false) && !is_https {
+                    continue;
+                }
                 cookie_map.insert(c.name().to_string(), c.value().to_string());
             }
         }
@@ -391,8 +609,13 @@ async fn build_cookie_header_for_url(
                 if c.expires_at.map(|e| e <= current).unwrap_or(false) {
                     continue;
                 }
+                if c.secure.unwrap_or(false) && !is_https {
+                    continue;
+                }
                 let c_dom = c.domain.trim_start_matches('.').to_lowercase();
-                if host == c_dom || host.ends_with(&format!(".{c_dom}")) || c_dom == base_domain {
+                let domain_match = host == c_dom || host.ends_with(&format!(".{c_dom}"));
+                let path_match = is_cookie_path_match(pathname, &c.path);
+                if domain_match && path_match {
                     cookie_map.insert(c.name.clone(), c.value.clone());
                 }
             }
@@ -432,6 +655,68 @@ async fn build_cookie_header_for_url(
                 .join("; "),
         )
     }
+}
+
+async fn send_public_get_with_safe_redirects(
+    raw_url: &str,
+    extra_headers: &[(&reqwest::header::HeaderName, &str)],
+    override_cookie: Option<&str>,
+    timeout: Duration,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(reqwest::Response, Url), String> {
+    let mut current_url = assert_public_http_url_resolved(raw_url).await?;
+    let initial_base = extract_base_domain(current_url.host_str().unwrap_or(""));
+
+    for _hop in 0..=8 {
+        let current_base = extract_base_domain(current_url.host_str().unwrap_or(""));
+        let same_base = current_base == initial_base;
+
+        let mut req = state
+            .client
+            .get(current_url.as_str())
+            .header(USER_AGENT, DEFAULT_USER_AGENT)
+            .timeout(timeout);
+
+        for (k, v) in extra_headers {
+            if !same_base && (*k == ORIGIN || *k == REFERER) {
+                continue;
+            }
+            req = req.header(*k, *v);
+        }
+
+        if !same_base {
+            let fallback_ref = format!("{}/", current_url.origin().ascii_serialization());
+            req = req.header(REFERER, fallback_ref);
+        }
+
+        let effective_override = if same_base { override_cookie } else { None };
+        if let Some(ck) =
+            build_cookie_header_for_url(&current_url, effective_override, app, state).await
+        {
+            req = req.header(COOKIE, ck);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("Lỗi kết nối tới trang web: {e}"))?;
+        merge_set_cookies_from_headers(resp.headers(), &current_url, state).await;
+
+        if resp.status().is_redirection() {
+            if let Some(loc_val) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) {
+                let next_url = current_url
+                    .join(loc_val)
+                    .map_err(|_| "Đường dẫn chuyển hướng (Location) không hợp lệ.".to_string())?;
+                current_url = assert_public_http_url_resolved(next_url.as_str()).await?;
+                continue;
+            }
+        }
+
+        return Ok((resp, current_url));
+    }
+
+    Err("Trang web chuyển hướng quá nhiều lần (vượt quá giới hạn an toàn).".to_string())
 }
 
 fn count_words_simple(text: &str) -> usize {
@@ -600,19 +885,16 @@ async fn fetch_image_as_data_url(
     if image_url.trim().is_empty() {
         return None;
     }
-    let parsed = assert_public_http_url(image_url).ok()?;
-    let mut req = state
-        .client
-        .get(parsed.as_str())
-        .header(USER_AGENT, DEFAULT_USER_AGENT)
-        .header(REFERER, referer)
-        .timeout(Duration::from_secs(10));
-
-    if let Some(ck) = build_cookie_header_for_url(&parsed, override_cookie, app, state).await {
-        req = req.header(COOKIE, ck);
-    }
-
-    let resp = req.send().await.ok()?;
+    let (resp, _) = send_public_get_with_safe_redirects(
+        image_url,
+        &[(&REFERER, referer)],
+        override_cookie,
+        Duration::from_secs(10),
+        app,
+        state,
+    )
+    .await
+    .ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -640,23 +922,21 @@ async fn fetch_pixiv_novel_detail(
     state: &AppState,
 ) -> Result<Value, String> {
     let url_str = format!("https://www.pixiv.net/ajax/novel/{novel_id}");
-    let parsed = Url::parse(&url_str).map_err(|e| e.to_string())?;
-    let mut req = state
-        .client
-        .get(&url_str)
-        .header(USER_AGENT, DEFAULT_USER_AGENT)
-        .header(REFERER, "https://www.pixiv.net/")
-        .header(ORIGIN, "https://www.pixiv.net")
-        .header(ACCEPT, "application/json, text/plain, */*")
-        .header(ACCEPT_LANGUAGE, "ja,vi;q=0.9,en-US;q=0.8,en;q=0.7")
-        .timeout(Duration::from_secs(15));
-
-    if let Some(ck) = build_cookie_header_for_url(&parsed, override_cookie, app, state).await {
-        req = req.header(COOKIE, ck);
-    }
-
-    let resp = req.send().await.map_err(|e| format!("Lỗi mạng Pixiv: {e}"))?;
-    merge_set_cookies_from_headers(resp.headers(), &parsed, state).await;
+    let (resp, _) = send_public_get_with_safe_redirects(
+        &url_str,
+        &[
+            (&REFERER, "https://www.pixiv.net/"),
+            (&ORIGIN, "https://www.pixiv.net"),
+            (&ACCEPT, "application/json, text/plain, */*"),
+            (&ACCEPT_LANGUAGE, "ja,vi;q=0.9,en-US;q=0.8,en;q=0.7"),
+        ],
+        override_cookie,
+        Duration::from_secs(15),
+        app,
+        state,
+    )
+    .await
+    .map_err(|e| format!("Lỗi mạng Pixiv: {e}"))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -686,23 +966,22 @@ async fn inspect_pixiv_series(
     let base_pixiv = Url::parse("https://www.pixiv.net/").unwrap();
     let ck = build_cookie_header_for_url(&base_pixiv, override_cookie, app, state).await;
 
-    let mut series_req = state
-        .client
-        .get(format!("https://www.pixiv.net/ajax/novel/series/{series_id}"))
-        .header(USER_AGENT, DEFAULT_USER_AGENT)
-        .header(REFERER, "https://www.pixiv.net/")
-        .header(ORIGIN, "https://www.pixiv.net")
-        .header(ACCEPT, "application/json, text/plain, */*")
-        .header(ACCEPT_LANGUAGE, "ja,vi;q=0.9,en-US;q=0.8,en;q=0.7")
-        .timeout(Duration::from_secs(15));
-    if let Some(ref cookie_str) = ck {
-        series_req = series_req.header(COOKIE, cookie_str);
-    }
-
-    let series_resp = series_req
-        .send()
-        .await
-        .map_err(|e| format!("Lỗi kết nối Pixiv: {e}"))?;
+    let series_url = format!("https://www.pixiv.net/ajax/novel/series/{series_id}");
+    let (series_resp, _) = send_public_get_with_safe_redirects(
+        &series_url,
+        &[
+            (&REFERER, "https://www.pixiv.net/"),
+            (&ORIGIN, "https://www.pixiv.net"),
+            (&ACCEPT, "application/json, text/plain, */*"),
+            (&ACCEPT_LANGUAGE, "ja,vi;q=0.9,en-US;q=0.8,en;q=0.7"),
+        ],
+        override_cookie,
+        Duration::from_secs(15),
+        app,
+        state,
+    )
+    .await
+    .map_err(|e| format!("Lỗi kết nối Pixiv: {e}"))?;
     if !series_resp.status().is_success() {
         return Err(format!(
             "Không tìm thấy series Pixiv #{series_id} (HTTP {}).",
@@ -751,20 +1030,23 @@ async fn inspect_pixiv_series(
 
     for _ in 0..50 {
         let content_url = format!(
-            "https://www.pixiv.net/ajax/novel/series_content/{series_id}?limit=30&last_order={last_order}&order_by=asc"
+            "https://www.pixiv.net/ajax/novel/series_content/{seriesId}?limit=30&last_order={last_order}&order_by=asc",
+            seriesId = series_id
         );
-        let mut c_req = state
-            .client
-            .get(&content_url)
-            .header(USER_AGENT, DEFAULT_USER_AGENT)
-            .header(REFERER, "https://www.pixiv.net/")
-            .header(ORIGIN, "https://www.pixiv.net")
-            .header(ACCEPT, "application/json, text/plain, */*")
-            .timeout(Duration::from_secs(15));
-        if let Some(ref cookie_str) = ck {
-            c_req = c_req.header(COOKIE, cookie_str);
-        }
-        let Ok(c_resp) = c_req.send().await else {
+        let Ok((c_resp, _)) = send_public_get_with_safe_redirects(
+            &content_url,
+            &[
+                (&REFERER, "https://www.pixiv.net/"),
+                (&ORIGIN, "https://www.pixiv.net"),
+                (&ACCEPT, "application/json, text/plain, */*"),
+            ],
+            override_cookie,
+            Duration::from_secs(15),
+            app,
+            state,
+        )
+        .await
+        else {
             break;
         };
         if !c_resp.status().is_success() {
@@ -1100,35 +1382,27 @@ async fn fetch_html_with_charset(
     state: &AppState,
 ) -> Result<(String, String), String> {
     let parsed = assert_public_http_url(target_url)?;
-    let origin = parsed.origin().ascii_serialization();
-    let mut req = state
-        .client
-        .get(parsed.as_str())
-        .header(USER_AGENT, DEFAULT_USER_AGENT)
-        .header(
-            ACCEPT,
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .header(ACCEPT_LANGUAGE, "vi,ja;q=0.9,en-US;q=0.8,en;q=0.7")
-        .header(REFERER, format!("{origin}/"))
-        .timeout(Duration::from_secs(15));
-
-    if let Some(ck) = build_cookie_header_for_url(&parsed, override_cookie, app, state).await {
-        req = req.header(COOKIE, ck);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Không thể truy cập trang web: {e}"))?;
-    merge_set_cookies_from_headers(resp.headers(), &parsed, state).await;
+    let origin_ref = format!("{}/", parsed.origin().ascii_serialization());
+    let (resp, resolved_url) = send_public_get_with_safe_redirects(
+        target_url,
+        &[
+            (&ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+            (&ACCEPT_LANGUAGE, "vi,ja;q=0.9,en-US;q=0.8,en;q=0.7"),
+            (&REFERER, origin_ref.as_str()),
+        ],
+        override_cookie,
+        Duration::from_secs(15),
+        app,
+        state,
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("Không thể truy cập trang web (HTTP {status})."));
     }
 
-    let final_url = resp.url().to_string();
+    let final_url = resolved_url.to_string();
     let ct = resp
         .headers()
         .get(CONTENT_TYPE)
@@ -1316,6 +1590,9 @@ fn parse_generic_web_sync(html: &str, final_url: &Url) -> SyncGenericExtract {
                         continue;
                     }
                     if let Ok(abs_url) = final_url.join(href) {
+                        if abs_url.scheme() != "http" && abs_url.scheme() != "https" {
+                            continue;
+                        }
                         let abs_str = abs_url.to_string();
                         if seen_urls.insert(abs_str.clone()) {
                             found_links.push((link_title, abs_str));
@@ -1331,7 +1608,11 @@ fn parse_generic_web_sync(html: &str, final_url: &Url) -> SyncGenericExtract {
 
     let raw_cover = sel_attr("meta[property=\"og:image\"]", "content");
     let raw_cover_abs = if !raw_cover.is_empty() {
-        final_url.join(&raw_cover).ok().map(|u| u.to_string())
+        final_url
+            .join(&raw_cover)
+            .ok()
+            .filter(|u| u.scheme() == "http" || u.scheme() == "https")
+            .map(|u| u.to_string())
     } else {
         None
     };
@@ -1483,13 +1764,30 @@ async fn desktop_sync_cookie_jars(
 ) -> Result<Vec<SiteCookieJar>, String> {
     let mut map = state.cookies_by_domain.lock().await;
     for jar in jars {
-        for c in jar.cookies {
-            let base = extract_base_domain(if c.domain.is_empty() {
-                &jar.domain
+        let jar_base = extract_base_domain(&jar.domain);
+        if jar_base.is_empty()
+            || !jar_base.contains('.')
+            || TWO_PART_TLDS.contains(&jar_base.as_str())
+        {
+            continue;
+        }
+        for mut c in jar.cookies {
+            if c.name.trim().is_empty() {
+                continue;
+            }
+            let c_dom = if c.domain.is_empty() {
+                jar_base.clone()
             } else {
-                &c.domain
-            });
-            upsert_cookie_entry(&mut map, &base, c);
+                c.domain.trim_start_matches('.').to_lowercase()
+            };
+            if extract_base_domain(&c_dom) != jar_base {
+                continue;
+            }
+            c.domain = c_dom;
+            if !c.path.starts_with('/') {
+                c.path = "/".to_string();
+            }
+            upsert_cookie_entry(&mut map, &jar_base, c);
         }
     }
     save_cookies_to_disk(&state.cookies_file_path, &map);
@@ -1503,6 +1801,12 @@ async fn desktop_set_manual_cookie(
     state: State<'_, AppState>,
 ) -> Result<Vec<SiteCookieJar>, String> {
     let base_domain = extract_base_domain(&domain_or_url);
+    if base_domain.is_empty()
+        || !base_domain.contains('.')
+        || TWO_PART_TLDS.contains(&base_domain.as_str())
+    {
+        return Err("Tên miền lưu cookie không hợp lệ.".to_string());
+    }
     let trimmed = cookie_string.trim();
     let normalized = if !trimmed.contains('=') && base_domain == "pixiv.net" {
         format!("PHPSESSID={trimmed}")
@@ -1586,7 +1890,7 @@ async fn desktop_inspect_url(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<WebNovelInspectResult, String> {
-    let parsed = assert_public_http_url(&url)?;
+    let parsed = assert_public_http_url_resolved(&url).await?;
     let url_str = parsed.to_string();
     let series_re = Regex::new(r"(?i)pixiv\.net/(?:[a-z]{2}/)?novel/series/(\d+)").unwrap();
     if let Some(cap) = series_re.captures(&url_str) {
@@ -1605,7 +1909,7 @@ async fn desktop_fetch_chapter(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DesktopFetchChapterResult, String> {
-    assert_public_http_url(&params.url)?;
+    assert_public_http_url_resolved(&params.url).await?;
     if params.source_type.as_deref() == Some("pixiv-novel") {
         let id_from_url = Regex::new(r"(?i)id=(\d+)")
             .unwrap()
@@ -1815,7 +2119,7 @@ async fn desktop_analyze_phrase(
 #[tauri::command]
 async fn desktop_open_browser_window(app: AppHandle, url: Option<String>) -> Result<(), String> {
     let target_url = match url.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(u) => assert_public_http_url(u)?,
+        Some(u) => assert_public_http_url_resolved(u).await?,
         None => Url::parse("https://www.pixiv.net/").unwrap(),
     };
 
@@ -1867,7 +2171,7 @@ async fn desktop_open_browser_window(app: AppHandle, url: Option<String>) -> Res
 
 #[tauri::command]
 async fn desktop_browser_navigate(app: AppHandle, url: String) -> Result<(), String> {
-    let parsed = assert_public_http_url(&url)?;
+    let parsed = assert_public_http_url_resolved(&url).await?;
     if let Some(existing) = app.get_webview_window("reader-browser") {
         existing
             .navigate(parsed)
@@ -1919,7 +2223,7 @@ pub fn run() {
             let initial_cookies = load_cookies_from_disk(&cookies_file_path);
 
             let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::limited(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("Failed to create HTTP client");
 

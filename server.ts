@@ -11,6 +11,11 @@ import {
   mergeCookiesFromResponse,
   mountBrowserProxyRoutes,
 } from './serverBrowserProxy.ts';
+import {
+  assertPublicHttpUrl,
+  assertPublicHttpUrlResolved,
+  extractBaseDomain,
+} from './serverSecurity.ts';
 
 dotenv.config();
 
@@ -51,34 +56,70 @@ interface InspectPayload {
   };
 }
 
-function assertPublicHttpUrl(rawUrl: string): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl.trim());
-  } catch {
-    throw new Error('URL không hợp lệ. Vui lòng nhập đầy đủ http:// hoặc https://');
+async function fetchPublicWithSafeRedirects(
+  rawUrl: string,
+  options: {
+    headers?: Record<string, string>;
+    overrideCookie?: string;
+    timeoutMs?: number;
+    maxRedirects?: number;
+  } = {}
+): Promise<{ response: globalThis.Response; finalUrl: URL }> {
+  let currentUrl = await assertPublicHttpUrlResolved(rawUrl);
+  const initialBaseDomain = extractBaseDomain(currentUrl.hostname);
+  const maxRedirects = options.maxRedirects ?? 8;
+  const timeoutMs = options.timeoutMs ?? 15000;
+
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const hopBaseDomain = extractBaseDomain(currentUrl.hostname);
+    const sameBaseDomain = hopBaseDomain === initialBaseDomain;
+
+    const reqHeaders: Record<string, string> = {
+      'User-Agent': DEFAULT_USER_AGENT,
+      ...(options.headers || {}),
+    };
+
+    if (!sameBaseDomain) {
+      delete reqHeaders['Origin'];
+      delete reqHeaders['origin'];
+      if (reqHeaders['Referer'] || reqHeaders['referer']) {
+        reqHeaders['Referer'] = `${currentUrl.origin}/`;
+        delete reqHeaders['referer'];
+      }
+    }
+
+    const effectiveCookie = getServerCookieHeaderForUrl(
+      currentUrl.toString(),
+      sameBaseDomain ? options.overrideCookie : undefined
+    );
+    if (effectiveCookie) {
+      reqHeaders['Cookie'] = effectiveCookie;
+    } else {
+      delete reqHeaders['Cookie'];
+      delete reqHeaders['cookie'];
+    }
+
+    const resp = await fetch(currentUrl.toString(), {
+      method: 'GET',
+      headers: reqHeaders,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    mergeCookiesFromResponse(resp, currentUrl);
+
+    const isRedirect =
+      resp.status >= 300 && resp.status < 400 && resp.headers.has('location');
+    if (!isRedirect) {
+      return { response: resp, finalUrl: currentUrl };
+    }
+
+    const location = resp.headers.get('location') || '';
+    const nextCandidate = new URL(location, currentUrl).toString();
+    currentUrl = await assertPublicHttpUrlResolved(nextCandidate);
   }
 
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('Chỉ hỗ trợ giao thức HTTP và HTTPS.');
-  }
-
-  const host = parsed.hostname.toLowerCase();
-  if (
-    host === 'localhost' ||
-    host === '0.0.0.0' ||
-    host === '::1' ||
-    host.endsWith('.local') ||
-    /^127\./.test(host) ||
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^169\.254\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
-  ) {
-    throw new Error('Không được phép truy cập địa chỉ mạng nội bộ.');
-  }
-
-  return parsed;
+  throw new Error('Trang web chuyển hướng quá nhiều lần (vượt quá giới hạn an toàn).');
 }
 
 function stripHtmlToText(html: string): string {
@@ -116,22 +157,14 @@ function normalizePixivCookie(cookie?: string): string | undefined {
   return trimmed;
 }
 
-function buildPixivHeaders(
-  cookie?: string,
-  targetUrl = 'https://www.pixiv.net/'
-): Record<string, string> {
-  const headers: Record<string, string> = {
+function buildPixivBaseHeaders(): Record<string, string> {
+  return {
     'User-Agent': DEFAULT_USER_AGENT,
     Referer: 'https://www.pixiv.net/',
     Origin: 'https://www.pixiv.net',
     Accept: 'application/json, text/plain, */*',
     'Accept-Language': 'ja,vi;q=0.9,en-US;q=0.8,en;q=0.7',
   };
-  const effectiveCookie = getServerCookieHeaderForUrl(targetUrl, normalizePixivCookie(cookie));
-  if (effectiveCookie) {
-    headers['Cookie'] = effectiveCookie;
-  }
-  return headers;
 }
 
 function getPixivRestrictionReason(detail: any): string | undefined {
@@ -224,18 +257,12 @@ async function fetchImageAsDataUrl(
 ): Promise<string | undefined> {
   if (!imageUrl) return undefined;
   try {
-    const parsed = assertPublicHttpUrl(imageUrl);
-    const headers: Record<string, string> = {
-      'User-Agent': DEFAULT_USER_AGENT,
-      Referer: referer,
-    };
-    const effectiveCookie = getServerCookieHeaderForUrl(parsed.toString(), cookie);
-    if (effectiveCookie) {
-      headers['Cookie'] = effectiveCookie;
-    }
-    const resp = await fetch(parsed.toString(), {
-      headers,
-      signal: AbortSignal.timeout(10000),
+    const { response: resp } = await fetchPublicWithSafeRedirects(imageUrl, {
+      headers: {
+        Referer: referer,
+      },
+      overrideCookie: cookie,
+      timeoutMs: 10000,
     });
     if (!resp.ok) return undefined;
     const contentType = resp.headers.get('content-type') || 'image/jpeg';
@@ -250,12 +277,11 @@ async function fetchImageAsDataUrl(
 
 async function fetchPixivNovelDetail(novelId: string, cookie?: string) {
   const url = `https://www.pixiv.net/ajax/novel/${novelId}`;
-  const headers = buildPixivHeaders(cookie, url);
-  const resp = await fetch(url, {
-    headers,
-    signal: AbortSignal.timeout(15000),
+  const { response: resp } = await fetchPublicWithSafeRedirects(url, {
+    headers: buildPixivBaseHeaders(),
+    overrideCookie: normalizePixivCookie(cookie),
+    timeoutMs: 15000,
   });
-  mergeCookiesFromResponse(resp, new URL(url));
   if (!resp.ok) {
     throw new Error(`Không thể tải truyện Pixiv #${novelId} (HTTP ${resp.status}).`);
   }
@@ -267,12 +293,17 @@ async function fetchPixivNovelDetail(novelId: string, cookie?: string) {
 }
 
 async function inspectPixivSeries(seriesId: string, cookie?: string): Promise<InspectPayload> {
-  const headers = buildPixivHeaders(cookie);
+  const baseHeaders = buildPixivBaseHeaders();
+  const normalizedCookie = normalizePixivCookie(cookie);
 
-  const seriesResp = await fetch(`https://www.pixiv.net/ajax/novel/series/${seriesId}`, {
-    headers,
-    signal: AbortSignal.timeout(15000),
-  });
+  const { response: seriesResp } = await fetchPublicWithSafeRedirects(
+    `https://www.pixiv.net/ajax/novel/series/${seriesId}`,
+    {
+      headers: baseHeaders,
+      overrideCookie: normalizedCookie,
+      timeoutMs: 15000,
+    }
+  );
   if (!seriesResp.ok) {
     throw new Error(`Không tìm thấy series Pixiv #${seriesId} (HTTP ${seriesResp.status}).`);
   }
@@ -294,9 +325,10 @@ async function inspectPixivSeries(seriesId: string, cookie?: string): Promise<In
   while (safetyLoop < 50) {
     safetyLoop++;
     const contentUrl = `https://www.pixiv.net/ajax/novel/series_content/${seriesId}?limit=30&last_order=${lastOrder}&order_by=asc`;
-    const cResp = await fetch(contentUrl, {
-      headers,
-      signal: AbortSignal.timeout(15000),
+    const { response: cResp } = await fetchPublicWithSafeRedirects(contentUrl, {
+      headers: baseHeaders,
+      overrideCookie: normalizedCookie,
+      timeoutMs: 15000,
     });
     if (!cResp.ok) break;
     const cJson = (await cResp.json()) as { error?: boolean; body?: any };
@@ -509,23 +541,16 @@ async function inspectPixivSingleNovel(novelId: string, cookie?: string): Promis
 }
 
 async function fetchHtmlWithCharset(targetUrl: string, cookie?: string): Promise<{ html: string; finalUrl: string }> {
-  const parsed = assertPublicHttpUrl(targetUrl);
-  const headers: Record<string, string> = {
-    'User-Agent': DEFAULT_USER_AGENT,
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'vi,ja;q=0.9,en-US;q=0.8,en;q=0.7',
-    Referer: parsed.origin + '/',
-  };
-  const effectiveCookie = getServerCookieHeaderForUrl(parsed.toString(), cookie);
-  if (effectiveCookie) {
-    headers['Cookie'] = effectiveCookie;
-  }
-
-  const resp = await fetch(parsed.toString(), {
-    headers,
-    signal: AbortSignal.timeout(15000),
+  const initialParsed = assertPublicHttpUrl(targetUrl);
+  const { response: resp, finalUrl } = await fetchPublicWithSafeRedirects(targetUrl, {
+    headers: {
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'vi,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+      Referer: initialParsed.origin + '/',
+    },
+    overrideCookie: cookie,
+    timeoutMs: 15000,
   });
-  mergeCookiesFromResponse(resp, parsed);
   if (!resp.ok) {
     throw new Error(`Không thể truy cập trang web (HTTP ${resp.status}).`);
   }
@@ -551,7 +576,7 @@ async function fetchHtmlWithCharset(targetUrl: string, cookie?: string): Promise
     html = new TextDecoder('utf-8').decode(buffer);
   }
 
-  return { html, finalUrl: resp.url || parsed.toString() };
+  return { html, finalUrl: finalUrl.toString() };
 }
 
 function extractArticleText($: cheerio.CheerioAPI): string {
@@ -693,7 +718,9 @@ async function inspectGenericWebUrl(rawUrl: string, cookie?: string): Promise<In
         const linkTitle = $(el).text().replace(/\s+/g, ' ').trim();
         if (!href || !linkTitle) return;
         try {
-          const absUrl = new URL(href, baseUrl).toString();
+          const abs = new URL(href, baseUrl);
+          if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return;
+          const absUrl = abs.toString();
           if (!seenUrls.has(absUrl)) {
             seenUrls.add(absUrl);
             foundLinks.push({ title: linkTitle, url: absUrl });
@@ -800,7 +827,7 @@ async function startServer() {
         return;
       }
 
-      const parsed = assertPublicHttpUrl(url);
+      const parsed = await assertPublicHttpUrlResolved(url);
       const urlStr = parsed.toString();
 
       // Detect Pixiv Novel Series
@@ -841,7 +868,7 @@ async function startServer() {
         res.status(400).json({ error: 'Thiếu URL chương.' });
         return;
       }
-      assertPublicHttpUrl(url);
+      await assertPublicHttpUrlResolved(url);
 
       if (sourceType === 'pixiv-novel') {
         const resolvedId =

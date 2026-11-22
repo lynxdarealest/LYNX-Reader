@@ -4,6 +4,15 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
+import {
+  assertPublicHttpUrlResolved,
+  escapeHtml,
+  extractBaseDomain,
+  isCookieDomainAllowed,
+  isCookiePathMatch,
+} from './serverSecurity.ts';
+
+export { extractBaseDomain };
 
 export interface StoredCookieEntry {
   name: string;
@@ -27,42 +36,6 @@ const DEFAULT_USER_AGENT =
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const COOKIE_STORE_FILE = path.resolve(__dirname, '.browser-cookies.json');
-
-const TWO_PART_TLDS = new Set([
-  'co.jp',
-  'ne.jp',
-  'or.jp',
-  'ac.jp',
-  'com.vn',
-  'net.vn',
-  'org.vn',
-  'edu.vn',
-  'co.uk',
-  'org.uk',
-  'com.cn',
-  'com.tw',
-  'com.hk',
-  'com.au',
-]);
-
-export function extractBaseDomain(urlOrHost: string): string {
-  let host = urlOrHost.trim().toLowerCase();
-  if (host.includes('://')) {
-    try {
-      host = new URL(host).hostname.toLowerCase();
-    } catch {
-      // keep as-is
-    }
-  }
-  host = host.replace(/^\.+/, '').split(':')[0];
-  const parts = host.split('.').filter(Boolean);
-  if (parts.length <= 2) return host;
-  const lastTwo = `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-  if (TWO_PART_TLDS.has(lastTwo) && parts.length >= 3) {
-    return `${parts[parts.length - 3]}.${lastTwo}`;
-  }
-  return lastTwo;
-}
 
 const serverCookieStore = new Map<string, SiteCookieJar>();
 
@@ -107,8 +80,12 @@ function parseSetCookieHeader(raw: string, requestUrl: URL): StoredCookieEntry |
 
   const name = parts[0].slice(0, eqIdx).trim();
   const value = parts[0].slice(eqIdx + 1).trim();
+  if (!name) return null;
 
-  let domain = requestUrl.hostname.toLowerCase();
+  const reqHost = requestUrl.hostname.toLowerCase();
+  const isHttps = requestUrl.protocol === 'https:';
+  let domain = reqHost;
+  let hasExplicitDomain = false;
   let cookiePath = '/';
   let expiresAt: number | undefined;
   let httpOnly = false;
@@ -122,6 +99,7 @@ function parseSetCookieHeader(raw: string, requestUrl: URL): StoredCookieEntry |
 
     if (key === 'domain' && val) {
       domain = val.replace(/^\.+/, '').toLowerCase();
+      hasExplicitDomain = true;
     } else if (key === 'path' && val) {
       cookiePath = val.startsWith('/') ? val : '/';
     } else if (key === 'max-age' && val) {
@@ -139,6 +117,19 @@ function parseSetCookieHeader(raw: string, requestUrl: URL): StoredCookieEntry |
     } else if (key === 'secure') {
       secure = true;
     }
+  }
+
+  // Reject cross-domain or overly broad (TLD / public suffix) cookies
+  if (hasExplicitDomain && !isCookieDomainAllowed(reqHost, domain)) {
+    return null;
+  }
+
+  // Enforce RFC 6265bis __Secure- and __Host- cookie prefix rules
+  if (name.startsWith('__Secure-') && (!isHttps || !secure)) {
+    return null;
+  }
+  if (name.startsWith('__Host-') && (!isHttps || !secure || hasExplicitDomain || cookiePath !== '/')) {
+    return null;
   }
 
   return {
@@ -249,8 +240,13 @@ export function getServerCookieHeaderForUrl(targetUrl: string, overrideCookie?: 
     return overrideCookie?.trim() || undefined;
   }
 
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return undefined;
+  }
+
   const hostname = parsed.hostname.toLowerCase();
   const pathname = parsed.pathname || '/';
+  const isHttps = parsed.protocol === 'https:';
   const baseDomain = extractBaseDomain(hostname);
   const jar = serverCookieStore.get(baseDomain);
 
@@ -260,10 +256,10 @@ export function getServerCookieHeaderForUrl(targetUrl: string, overrideCookie?: 
   if (jar) {
     for (const c of jar.cookies) {
       if (c.expiresAt && c.expiresAt <= now) continue;
+      if (c.secure && !isHttps) continue;
       const cDom = c.domain.toLowerCase().replace(/^\.+/, '');
       const domainMatch = hostname === cDom || hostname.endsWith(`.${cDom}`);
-      const cPath = c.path || '/';
-      const pathMatch = pathname.startsWith(cPath);
+      const pathMatch = isCookiePathMatch(pathname, c.path || '/');
       if (domainMatch && pathMatch) {
         cookieMap.set(c.name, c.value);
       }
@@ -324,6 +320,7 @@ function rewriteCssUrls(css: string, baseUrl: URL): string {
 function getClientReadableCookiesForUrl(targetUrl: URL): Array<{ name: string; value: string }> {
   const hostname = targetUrl.hostname.toLowerCase();
   const pathname = targetUrl.pathname || '/';
+  const isHttps = targetUrl.protocol === 'https:';
   const baseDomain = extractBaseDomain(hostname);
   const jar = serverCookieStore.get(baseDomain);
   if (!jar) return [];
@@ -333,10 +330,10 @@ function getClientReadableCookiesForUrl(targetUrl: URL): Array<{ name: string; v
   for (const c of jar.cookies) {
     if (c.httpOnly) continue;
     if (c.expiresAt && c.expiresAt <= now) continue;
+    if (c.secure && !isHttps) continue;
     const cDom = c.domain.toLowerCase().replace(/^\.+/, '');
     const domainMatch = hostname === cDom || hostname.endsWith(`.${cDom}`);
-    const cPath = c.path || '/';
-    const pathMatch = pathname.startsWith(cPath);
+    const pathMatch = isCookiePathMatch(pathname, c.path || '/');
     if (domainMatch && pathMatch) {
       map.set(c.name, c.value);
     }
@@ -919,11 +916,19 @@ export function mountBrowserProxyRoutes(
         for (const jar of jars) {
           if (!jar?.domain || !Array.isArray(jar.cookies)) continue;
           const base = extractBaseDomain(jar.domain);
+          if (!base) continue;
           const existing = serverCookieStore.get(base);
-          // Merge without clobbering newer server cookies
+          // Merge without clobbering newer server cookies or allowing cross-domain jar injection
           for (const c of jar.cookies) {
+            if (!c || typeof c.name !== 'string' || !c.name.trim()) continue;
+            const cDomain = (c.domain || base).toLowerCase().replace(/^\.+/, '');
+            if (extractBaseDomain(cDomain) !== base) continue;
             if (!existing || (jar.updatedAt || 0) >= existing.updatedAt) {
-              upsertCookieEntry(base, c);
+              upsertCookieEntry(base, {
+                ...c,
+                domain: cDomain,
+                path: c.path && c.path.startsWith('/') ? c.path : '/',
+              });
             }
           }
         }
@@ -1000,7 +1005,8 @@ export function mountBrowserProxyRoutes(
           return;
         }
 
-        let currentUrl = assertPublicHttpUrl(rawUrl);
+        let currentUrl = await assertPublicHttpUrlResolved(rawUrl);
+        const initialOrigin = currentUrl.origin;
         let method = req.method.toUpperCase();
         let bodyBuffer: Buffer | undefined =
           method !== 'GET' && method !== 'HEAD' && Buffer.isBuffer(req.body) && req.body.length > 0
@@ -1026,7 +1032,10 @@ export function mountBrowserProxyRoutes(
         let upstreamResp: globalThis.Response | null = null;
 
         for (let hop = 0; hop <= maxRedirects; hop++) {
-          let effectiveReferer = parentTargetUrl?.toString() || `${currentUrl.origin}/`;
+          let effectiveReferer =
+            parentTargetUrl && (parentTargetUrl.protocol === 'https:' || currentUrl.protocol === 'http:')
+              ? parentTargetUrl.toString()
+              : `${currentUrl.origin}/`;
           if (
             currentUrl.hostname.toLowerCase().endsWith('pximg.net') &&
             (!parentTargetUrl || !extractBaseDomain(parentTargetUrl.hostname).endsWith('pixiv.net'))
@@ -1047,14 +1056,20 @@ export function mountBrowserProxyRoutes(
           };
 
           // Forward safe CSRF/AJAX headers required by web login forms & SPAs
+          // Never leak Authorization headers across cross-origin redirects
           for (const [hdrKey, hdrVal] of Object.entries(req.headers)) {
             if (typeof hdrVal !== 'string') continue;
             const low = hdrKey.toLowerCase();
+            if (low === 'authorization') {
+              if (currentUrl.origin === initialOrigin) {
+                headers[hdrKey] = hdrVal;
+              }
+              continue;
+            }
             if (
               low === 'x-csrf-token' ||
               low === 'x-xsrf-token' ||
               low === 'x-requested-with' ||
-              low === 'authorization' ||
               low === 'x-user-id' ||
               (low.startsWith('x-') &&
                 !low.startsWith('x-forwarded-') &&
@@ -1070,7 +1085,10 @@ export function mountBrowserProxyRoutes(
             headers['Content-Type'] = contentTypeHeader;
           }
           if (bodyBuffer && method !== 'GET' && method !== 'HEAD') {
-            headers['Origin'] = parentTargetUrl?.origin || currentUrl.origin;
+            headers['Origin'] =
+              parentTargetUrl && parentTargetUrl.origin === currentUrl.origin
+                ? parentTargetUrl.origin
+                : currentUrl.origin;
           }
 
           const cookieHeader = getServerCookieHeaderForUrl(currentUrl.toString());
@@ -1086,7 +1104,7 @@ export function mountBrowserProxyRoutes(
             signal: AbortSignal.timeout(20000),
           });
 
-          // Capture Set-Cookie from every hop!
+          // Capture Set-Cookie from every hop strictly scoped to currentUrl
           mergeCookiesFromResponse(upstreamResp, currentUrl);
 
           const isRedirect =
@@ -1099,7 +1117,7 @@ export function mountBrowserProxyRoutes(
           }
 
           const loc = upstreamResp.headers.get('location') || '';
-          const nextUrl = assertPublicHttpUrl(new URL(loc, currentUrl).toString());
+          const nextUrl = await assertPublicHttpUrlResolved(new URL(loc, currentUrl).toString());
 
           // On POST/PUT/PATCH 301/302/303, return a 303 redirect to the browser iframe so it converts to GET and updates location
           if (
@@ -1233,10 +1251,9 @@ export function mountBrowserProxyRoutes(
         res.setHeader('Content-Type', rawContentType);
         res.send(rawBytes);
       } catch (err: any) {
+        const safeErr = escapeHtml(err?.message || 'Lỗi kết nối');
         res.status(502).send(
-          `<!doctype html><html><body style="font-family:sans-serif;background:#111;color:#eee;padding:24px;"><h3>Không thể tải trang trong trình duyệt</h3><p style="color:#f87171;">${
-            err?.message || 'Lỗi kết nối'
-          }</p></body></html>`
+          `<!doctype html><html><body style="font-family:sans-serif;background:#111;color:#eee;padding:24px;"><h3>Không thể tải trang trong trình duyệt</h3><p style="color:#f87171;">${safeErr}</p></body></html>`
         );
       }
     }

@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { Trash2, X, Loader2 } from 'lucide-react';
+import { Trash2, X, Loader2, AlertTriangle } from 'lucide-react';
 import { Book, Chapter, ReaderSettings, BookStatus } from './types';
 import {
   getAllBooks,
@@ -13,6 +13,8 @@ import {
   deleteBook,
   getSettings,
   saveSettings,
+  getStorageDiagnostics,
+  StorageDiagnosticStatus,
   DEFAULT_SETTINGS,
 } from './services/storage';
 import { TitleBar } from './components/TitleBar';
@@ -51,9 +53,12 @@ export default function App() {
   const [pendingDeleteBook, setPendingDeleteBook] = React.useState<Book | null>(null);
   const [isDeletingBook, setIsDeletingBook] = React.useState(false);
   const [deleteBookError, setDeleteBookError] = React.useState<string | null>(null);
+  const [libraryLoadError, setLibraryLoadError] = React.useState<string | null>(null);
+  const [storageDiag, setStorageDiag] = React.useState<StorageDiagnosticStatus | null>(null);
 
   // Initial load
   const loadLibrary = React.useCallback(async () => {
+    setLibraryLoadError(null);
     try {
       if (
         !localStorage.getItem('lynx_removed_seeded_samples_v1') &&
@@ -69,9 +74,13 @@ export default function App() {
       setBooks(loadedBooks);
       const loadedSettings = await getSettings();
       setSettings(loadedSettings);
+      setStorageDiag(getStorageDiagnostics());
       await hydrateServerCookiesFromIndexedDB();
     } catch (err) {
-      console.error('Failed to load library:', err);
+      const msg = err instanceof Error ? err.message : 'Không thể tải thư viện từ cơ sở dữ liệu cục bộ.';
+      console.error('Failed to load library:', msg);
+      setLibraryLoadError(msg);
+      setStorageDiag(getStorageDiagnostics());
     }
   }, []);
 
@@ -207,6 +216,38 @@ export default function App() {
         currentBookTitle={activeBook?.title}
         onBackToLibrary={activeBook ? handleBackToLibrary : undefined}
       />
+
+      {/* Storage / Migration Warning Banner (shown only on failure) */}
+      {(libraryLoadError || storageDiag?.migrationState === 'failed') && (
+        <div className="px-4 py-2 bg-red-950/70 border-b border-red-800/70 flex flex-wrap items-center justify-between gap-2 text-xs text-red-200 select-none">
+          <div className="flex items-center space-x-2 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span className="truncate">
+              {libraryLoadError
+                ? `Lỗi cơ sở dữ liệu: ${libraryLoadError}`
+                : `Di trú dữ liệu cũ chưa hoàn tất (dữ liệu gốc VBookDesktopDB vẫn được giữ nguyên): ${
+                    storageDiag?.migrationError || 'Vui lòng kiểm tra và sao lưu.'
+                  }`}
+            </span>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              className="px-2.5 py-1 bg-red-800/80 hover:bg-red-700 text-white rounded text-[11px] font-medium cursor-pointer"
+            >
+              Mở Cài đặt & Sao lưu
+            </button>
+            <button
+              type="button"
+              onClick={loadLibrary}
+              className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded text-[11px] font-medium cursor-pointer"
+            >
+              Thử lại
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Workspace */}
       <div className="flex-1 flex overflow-hidden relative">
