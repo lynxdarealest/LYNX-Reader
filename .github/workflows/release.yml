@@ -1,0 +1,99 @@
+name: Build and publish LYNX Reader release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release version, for example 0.1.2 or v0.1.2'
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag && (startsWith(inputs.release_tag, 'v') && inputs.release_tag || format('v{0}', inputs.release_tag)) || github.ref_name }}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Set app versions from release tag
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG.Trim()
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Error "Release tag must look like v0.1.2; received '$tag'."
+            exit 1
+          }
+          $version = $tag.Substring(1)
+          node -e "
+            const fs = require('fs');
+            const v = '$version';
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = v;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            conf.version = v;
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+            let cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+            cargo = cargo.replace(/^version\s*=\s*\"[^\"]+\"/m, 'version = \"' + v + '\"');
+            fs.writeFileSync('src-tauri/Cargo.toml', cargo);
+          "
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows Tauri installer
+        run: npm run release:win
+
+      - name: Create release and upload Windows installer
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG.Trim()
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "${{ github.repository }}" --draft --target "${{ github.sha }}" --title "LYNX Reader $tag" --notes "Lightweight Tauri v2 Windows installer for LYNX Reader $tag."
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          $installers = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*.exe" -File
+          if (-not $installers -or $installers.Count -eq 0) {
+            Write-Error "No NSIS installer .exe was generated under src-tauri/target/release/bundle/nsis"
+            exit 1
+          }
+
+          foreach ($file in $installers) {
+            gh release upload $tag $file.FullName --repo "${{ github.repository }}" --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          gh release edit $tag --repo "${{ github.repository }}" --draft=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
