@@ -12,6 +12,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Eye,
+  EyeOff,
   Sliders,
   Sparkles,
   Keyboard,
@@ -332,6 +333,39 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
   const contentContainerRef = React.useRef<HTMLDivElement>(null);
   const saveTimeoutRef = React.useRef<number | null>(null);
+  const [currentChapterProgress, setCurrentChapterProgress] = React.useState<number>(() =>
+    Math.min(1, Math.max(0, book.scrollProgress || 0))
+  );
+  const pendingIntraSeekRef = React.useRef<{ chapterIndex: number; progress: number } | null>(null);
+  const [isEditingPercent, setIsEditingPercent] = React.useState(false);
+  const [percentInputStr, setPercentInputStr] = React.useState('');
+  const [showHeaderSeekPopover, setShowHeaderSeekPopover] = React.useState(false);
+  const headerSeekRef = React.useRef<HTMLDivElement>(null);
+  const percentDragRef = React.useRef<{
+    startX: number;
+    startPercent: number;
+    moved: boolean;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!showHeaderSeekPopover) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (headerSeekRef.current && !headerSeekRef.current.contains(e.target as Node)) {
+        setShowHeaderSeekPopover(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showHeaderSeekPopover]);
+
+  React.useEffect(() => {
+    if (showUI || showTTS) {
+      setIsEditingPercent(false);
+    }
+    if (!showUI) {
+      setShowHeaderSeekPopover(false);
+    }
+  }, [showUI, showTTS]);
 
   const currentChapter = localChapters[currentChapterIndex] || {
     id: 'empty',
@@ -1070,25 +1104,59 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   React.useEffect(() => {
     setFocusedParaIndex(0);
     if (!contentContainerRef.current) return;
+
+    const pending = pendingIntraSeekRef.current;
+    if (pending && pending.chapterIndex === currentChapterIndex) {
+      pendingIntraSeekRef.current = null;
+      restoredInitialScrollRef.current = true;
+      setCurrentChapterProgress(pending.progress);
+      if (settings.readingMode !== 'paginated' && settings.readingMode !== 'two-column') {
+        requestAnimationFrame(() => {
+          const el = contentContainerRef.current;
+          if (!el) return;
+          if (settings.readingMode === 'continuous') {
+            const blk = el.querySelector<HTMLElement>(`[data-continuous-ch="${currentChapterIndex}"]`);
+            if (blk) {
+              el.scrollTop = Math.round(
+                Math.max(0, blk.offsetTop + pending.progress * Math.max(0, blk.offsetHeight - el.clientHeight * 0.5))
+              );
+              return;
+            }
+          }
+          const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+          el.scrollTop = Math.round(maxScroll * pending.progress);
+          if (settings.readingMode === 'focus' && paragraphs.length > 0) {
+            setFocusedParaIndex(Math.min(paragraphs.length - 1, Math.round(pending.progress * (paragraphs.length - 1))));
+          }
+        });
+      }
+      return;
+    }
+
     if (settings.readingMode === 'scroll') {
       if (!restoredInitialScrollRef.current && book.scrollProgress > 0 && currentChapterIndex === (book.currentChapterIndex || 0)) {
         restoredInitialScrollRef.current = true;
+        const initProg = Math.min(0.98, Math.max(0, book.scrollProgress));
+        setCurrentChapterProgress(initProg);
         requestAnimationFrame(() => {
           const el = contentContainerRef.current;
           if (!el) return;
           const maxScroll = el.scrollHeight - el.clientHeight;
           if (maxScroll > 0) {
-            el.scrollTop = Math.round(maxScroll * Math.min(0.98, book.scrollProgress));
+            el.scrollTop = Math.round(maxScroll * initProg);
           }
         });
       } else {
         restoredInitialScrollRef.current = true;
         contentContainerRef.current.scrollTop = 0;
+        setCurrentChapterProgress(0);
       }
     } else if (settings.readingMode === 'continuous' && !skipContinuousResetRef.current) {
       contentContainerRef.current.scrollTop = 0;
+      setCurrentChapterProgress(0);
     } else if (settings.readingMode === 'focus') {
       contentContainerRef.current.scrollTop = 0;
+      setCurrentChapterProgress(0);
     }
   }, [currentChapterIndex, settings.readingMode]);
 
@@ -1181,7 +1249,10 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     const maxScroll = scrollHeight - clientHeight;
 
     if (settings.readingMode === 'scroll' || settings.readingMode === 'focus') {
-      const progress = maxScroll > 0 ? scrollTop / maxScroll : 0;
+      const progress = maxScroll > 0 ? Math.min(1, Math.max(0, scrollTop / maxScroll)) : 0;
+      setCurrentChapterProgress((prev) =>
+        Math.abs(prev - progress) >= 0.00005 || progress === 0 || progress === 1 ? progress : prev
+      );
       saveReadingProgress(currentChapterIndex, progress);
       return;
     }
@@ -1221,6 +1292,9 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       if (activeBlock) {
         const bRect = (activeBlock as HTMLElement).getBoundingClientRect();
         const chProg = bRect.height > 0 ? Math.min(1, Math.max(0, (thresholdY - bRect.top) / bRect.height)) : 0;
+        setCurrentChapterProgress((prev) =>
+          Math.abs(prev - chProg) >= 0.00005 || chProg === 0 || chProg === 1 ? chProg : prev
+        );
         saveReadingProgress(activeIdx, chProg);
       }
     }
@@ -1261,11 +1335,14 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   // Chapter Navigation
   const handleGoToChapter = (newIndex: number) => {
     if (newIndex >= 0 && newIndex < localChapters.length) {
+      pendingIntraSeekRef.current = null;
       skipContinuousResetRef.current = false;
+      const targetProg = jumpToLastPageOnLoadRef.current ? 1 : 0;
       setCurrentChapterIndex(newIndex);
       setCurrentPageIndex(0);
       setFocusedParaIndex(0);
-      saveReadingProgress(newIndex, 0);
+      setCurrentChapterProgress(targetProg);
+      saveReadingProgress(newIndex, targetProg);
     }
   };
 
@@ -1352,6 +1429,10 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       if (e.key === 'Escape') {
         if (pendingNoteModal) {
           setPendingNoteModal(null);
+          return;
+        }
+        if (showHeaderSeekPopover) {
+          setShowHeaderSeekPopover(false);
           return;
         }
         if (showMoreMenu) {
@@ -1671,6 +1752,8 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       // Home / End
       if (e.key === 'Home') {
         e.preventDefault();
+        setCurrentChapterProgress(0);
+        saveReadingProgress(currentChapterIndex, 0);
         if (settings.readingMode === 'paginated' || settings.readingMode === 'two-column') {
           setCurrentPageIndex(0);
           showHUDToast('Trang đầu chương');
@@ -1686,6 +1769,8 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       }
       if (e.key === 'End') {
         e.preventDefault();
+        setCurrentChapterProgress(1);
+        saveReadingProgress(currentChapterIndex, 1);
         if (settings.readingMode === 'paginated' || settings.readingMode === 'two-column') {
           setCurrentPageIndex(Math.max(0, totalPages - 1));
           showHUDToast('Trang cuối chương');
@@ -1723,6 +1808,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     showExport,
     showShortcutHelp,
     showMoreMenu,
+    showHeaderSeekPopover,
     pendingNoteModal,
     ttsState,
     isViewingTranslation,
@@ -1730,6 +1816,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     toggleLightDark,
     handleApplyCustomTheme,
     onUpdateSettings,
+    saveReadingProgress,
     showHUDToast,
     onBackToLibrary,
   ]);
@@ -1767,9 +1854,20 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     const calculatedTotal = Math.max(1, Math.ceil((track.scrollWidth - 4) / stepWidth));
     setTotalPages(calculatedTotal);
 
-    if (jumpToLastPageOnLoadRef.current) {
+    const pendingPaged = pendingIntraSeekRef.current;
+    if (pendingPaged && pendingPaged.chapterIndex === currentChapterIndex) {
+      pendingIntraSeekRef.current = null;
       jumpToLastPageOnLoadRef.current = false;
-      setCurrentPageIndex(Math.max(0, calculatedTotal - 1));
+      const targetPage =
+        calculatedTotal > 1 ? Math.round(pendingPaged.progress * (calculatedTotal - 1)) : 0;
+      const safePage = Math.min(Math.max(0, targetPage), Math.max(0, calculatedTotal - 1));
+      setCurrentPageIndex(safePage);
+      setCurrentChapterProgress(calculatedTotal > 1 ? safePage / (calculatedTotal - 1) : pendingPaged.progress);
+    } else if (jumpToLastPageOnLoadRef.current) {
+      jumpToLastPageOnLoadRef.current = false;
+      const lastPage = Math.max(0, calculatedTotal - 1);
+      setCurrentPageIndex(lastPage);
+      setCurrentChapterProgress(1);
     } else {
       setCurrentPageIndex((prev) => Math.min(prev, Math.max(0, calculatedTotal - 1)));
     }
@@ -1796,8 +1894,10 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const handleNextPage = () => {
     if (currentPageIndex < totalPages - 1) {
       const next = currentPageIndex + 1;
+      const prog = totalPages > 1 ? next / (totalPages - 1) : 1;
       setCurrentPageIndex(next);
-      saveReadingProgress(currentChapterIndex, totalPages > 1 ? next / (totalPages - 1) : 1);
+      setCurrentChapterProgress(prog);
+      saveReadingProgress(currentChapterIndex, prog);
     } else if (currentChapterIndex < localChapters.length - 1) {
       handleGoToChapter(currentChapterIndex + 1);
     } else {
@@ -1808,8 +1908,10 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const handlePrevPage = () => {
     if (currentPageIndex > 0) {
       const prev = currentPageIndex - 1;
+      const prog = totalPages > 1 ? prev / (totalPages - 1) : 0;
       setCurrentPageIndex(prev);
-      saveReadingProgress(currentChapterIndex, totalPages > 1 ? prev / (totalPages - 1) : 0);
+      setCurrentChapterProgress(prog);
+      saveReadingProgress(currentChapterIndex, prog);
     } else if (currentChapterIndex > 0) {
       jumpToLastPageOnLoadRef.current = true;
       handleGoToChapter(currentChapterIndex - 1);
@@ -1821,6 +1923,9 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const stepFocusParagraph = (delta: number) => {
     setFocusedParaIndex((prev) => {
       const next = Math.max(0, Math.min(Math.max(0, paragraphs.length - 1), prev + delta));
+      const prog = paragraphs.length > 1 ? next / (paragraphs.length - 1) : 0;
+      setCurrentChapterProgress(prog);
+      saveReadingProgress(currentChapterIndex, prog);
       requestAnimationFrame(() => {
         const el = contentContainerRef.current?.querySelector<HTMLElement>(`[data-para-idx="${next}"]`);
         el?.scrollIntoView({
@@ -1969,15 +2074,137 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
   const visibleParagraphs = processedParagraphs;
 
-  const currentOverallPercent = Math.min(
-    100,
-    Math.max(
-      0,
-      localChapters.length > 0
-        ? Math.round(((currentChapterIndex + 1) / localChapters.length) * 100)
-        : 0
-    )
+  const chapterWeights = React.useMemo(() => {
+    const weights: number[] = [];
+    const cumStart: number[] = [];
+    let total = 0;
+    for (let i = 0; i < localChapters.length; i++) {
+      const ch = localChapters[i];
+      const w = Math.max(1, ch.content?.length || ch.wordCount || 1);
+      cumStart.push(total);
+      weights.push(w);
+      total += w;
+    }
+    return { weights, cumStart, total: Math.max(1, total) };
+  }, [localChapters]);
+
+  const effectiveChapterProgress = React.useMemo(() => {
+    if (isPagedMode) {
+      if (totalPages > 1) {
+        return Math.min(1, Math.max(0, currentPageIndex / (totalPages - 1)));
+      }
+      return currentChapterProgress;
+    }
+    return Math.min(1, Math.max(0, currentChapterProgress));
+  }, [isPagedMode, totalPages, currentPageIndex, currentChapterProgress]);
+
+  const exactOverallPercent = React.useMemo(() => {
+    if (localChapters.length === 0) return 0;
+    const idx = Math.min(Math.max(0, currentChapterIndex), localChapters.length - 1);
+    const w = chapterWeights.weights[idx] || 1;
+    const start = chapterWeights.cumStart[idx] || 0;
+    const ratio = (start + effectiveChapterProgress * w) / chapterWeights.total;
+    return Math.min(100, Math.max(0, ratio * 100));
+  }, [localChapters.length, currentChapterIndex, chapterWeights, effectiveChapterProgress]);
+
+  const formattedExactPercent = `${exactOverallPercent.toFixed(2).replace('.', ',')}%`;
+
+  const applyIntraChapterScroll = React.useCallback(
+    (targetChIdx: number, intra: number) => {
+      const el = contentContainerRef.current;
+      if (!el) return;
+      if (settings.readingMode === 'continuous') {
+        const blk = el.querySelector<HTMLElement>(`[data-continuous-ch="${targetChIdx}"]`);
+        if (blk) {
+          el.scrollTop = Math.round(
+            Math.max(0, blk.offsetTop + intra * Math.max(0, blk.offsetHeight - el.clientHeight * 0.5))
+          );
+          return;
+        }
+      }
+      const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+      el.scrollTop = Math.round(maxScroll * intra);
+      if (settings.readingMode === 'focus' && paragraphs.length > 0) {
+        setFocusedParaIndex(Math.min(paragraphs.length - 1, Math.round(intra * (paragraphs.length - 1))));
+      }
+    },
+    [settings.readingMode, paragraphs.length]
   );
+
+  const handleSeekToPercent = React.useCallback(
+    (rawTargetPercent: number) => {
+      if (localChapters.length === 0 || !Number.isFinite(rawTargetPercent)) return;
+      const clamped = Math.min(100, Math.max(0, rawTargetPercent));
+      const targetWeight = (clamped / 100) * chapterWeights.total;
+
+      let targetIdx = localChapters.length - 1;
+      for (let i = 0; i < localChapters.length; i++) {
+        const end = chapterWeights.cumStart[i] + chapterWeights.weights[i];
+        if (targetWeight <= end || i === localChapters.length - 1) {
+          targetIdx = i;
+          break;
+        }
+      }
+
+      const w = chapterWeights.weights[targetIdx] || 1;
+      const start = chapterWeights.cumStart[targetIdx] || 0;
+      const intra =
+        clamped >= 100
+          ? 1
+          : clamped <= 0
+          ? 0
+          : Math.min(1, Math.max(0, (targetWeight - start) / w));
+
+      setCurrentChapterProgress(intra);
+      saveReadingProgress(targetIdx, intra);
+
+      if (targetIdx === currentChapterIndex) {
+        if (isPagedMode) {
+          const nextPage = totalPages > 1 ? Math.round(intra * (totalPages - 1)) : 0;
+          setCurrentPageIndex(Math.min(Math.max(0, nextPage), Math.max(0, totalPages - 1)));
+        } else {
+          applyIntraChapterScroll(targetIdx, intra);
+        }
+      } else {
+        pendingIntraSeekRef.current = { chapterIndex: targetIdx, progress: intra };
+        skipContinuousResetRef.current = false;
+        setCurrentChapterIndex(targetIdx);
+        setCurrentPageIndex(0);
+        setFocusedParaIndex(0);
+      }
+    },
+    [
+      localChapters.length,
+      chapterWeights,
+      currentChapterIndex,
+      isPagedMode,
+      totalPages,
+      applyIntraChapterScroll,
+      saveReadingProgress,
+    ]
+  );
+
+  const parsePercentInput = (raw: string): number | null => {
+    const cleaned = raw.replace(/%/g, '').trim().replace(',', '.');
+    if (!cleaned) return null;
+    const val = Number.parseFloat(cleaned);
+    if (!Number.isFinite(val)) return null;
+    return Math.min(100, Math.max(0, val));
+  };
+
+  const handleOpenPercentEdit = () => {
+    setPercentInputStr(exactOverallPercent.toFixed(2).replace('.', ','));
+    setIsEditingPercent(true);
+  };
+
+  const handleCommitPercentEdit = () => {
+    const parsed = parsePercentInput(percentInputStr);
+    setIsEditingPercent(false);
+    if (parsed !== null) {
+      handleSeekToPercent(parsed);
+      showHUDToast(`Đã tua tới ${parsed.toFixed(2).replace('.', ',')}%`);
+    }
+  };
 
   const activeCustomTheme = settings.customThemes?.find((t) => t.id === settings.theme);
   const containerBg = activeCustomTheme
@@ -2040,16 +2267,96 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
           {/* Right: Reading Progress, Navigation & Single Corner Popover */}
           <div className="flex items-center gap-2 shrink-0">
-            {/* Compact Reading Progress */}
-            <div
-              className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-black/15 dark:bg-white/5 border border-black/10 dark:border-white/10 text-[11px] font-mono"
-              title={`Tiến trình đọc: Chương ${currentChapterIndex + 1} / ${localChapters.length} (${currentOverallPercent}%)`}
-            >
-              <span className="opacity-75">
-                Ch. {currentChapterIndex + 1}/{localChapters.length}
-              </span>
-              <span className="opacity-30">•</span>
-              <span className="font-semibold text-amber-500">{currentOverallPercent}%</span>
+            {/* Compact Reading Progress + Click to Seek % */}
+            <div className="relative" ref={headerSeekRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  setPercentInputStr(exactOverallPercent.toFixed(2).replace('.', ','));
+                  setShowHeaderSeekPopover((prev) => !prev);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/15 dark:bg-white/5 hover:bg-black/25 dark:hover:bg-white/10 border border-black/10 dark:border-white/10 text-[11px] font-mono cursor-pointer transition-colors"
+                title="Bấm để tua theo phần trăm chính xác"
+              >
+                <span className="opacity-75 hidden sm:inline">
+                  Ch. {currentChapterIndex + 1}/{localChapters.length}
+                </span>
+                <span className="opacity-30 hidden sm:inline">•</span>
+                <span className="font-semibold text-amber-500">{formattedExactPercent}</span>
+              </button>
+
+              {showHeaderSeekPopover && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute right-0 top-full mt-2 w-72 bg-neutral-900/98 border border-neutral-700/80 rounded-xl shadow-2xl p-3 text-xs text-neutral-200 z-50 backdrop-blur-md space-y-2.5"
+                >
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-neutral-100">Tua theo phần trăm</span>
+                    <span className="font-mono text-amber-400 font-bold">
+                      Ch. {currentChapterIndex + 1}/{localChapters.length} • {formattedExactPercent}
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={0.01}
+                    value={exactOverallPercent}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      setPercentInputStr(v.toFixed(2).replace('.', ','));
+                      handleSeekToPercent(v);
+                    }}
+                    className="w-full accent-amber-500 cursor-pointer h-1.5"
+                  />
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const parsed = parsePercentInput(percentInputStr);
+                      if (parsed !== null) {
+                        handleSeekToPercent(parsed);
+                        setShowHeaderSeekPopover(false);
+                        showHUDToast(`Đã tua tới ${parsed.toFixed(2).replace('.', ',')}%`);
+                      }
+                    }}
+                    className="flex items-center gap-1.5"
+                  >
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={percentInputStr}
+                      onChange={(e) => setPercentInputStr(e.target.value)}
+                      placeholder="0,00 – 100,00"
+                      className="flex-1 px-2.5 py-1 bg-neutral-950 border border-neutral-700 rounded-lg text-xs font-mono text-neutral-100 focus:outline-none focus:border-amber-500"
+                    />
+                    <span className="text-neutral-400 font-mono">%</span>
+                    <button
+                      type="submit"
+                      className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold cursor-pointer"
+                    >
+                      Tua
+                    </button>
+                  </form>
+
+                  <div className="flex items-center justify-between gap-1 pt-0.5">
+                    {[0, 25, 50, 75, 100].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => {
+                          setPercentInputStr(pct.toFixed(2).replace('.', ','));
+                          handleSeekToPercent(pct);
+                        }}
+                        className="flex-1 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-[10px] font-mono text-neutral-300 cursor-pointer"
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Navigation Controls */}
@@ -2083,6 +2390,16 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Hide Taskbar / Switch to Slim Progress Bar */}
+            <button
+              type="button"
+              onClick={() => setShowUI(false)}
+              className="p-2 rounded-xl border border-black/10 dark:border-white/10 bg-black/15 dark:bg-white/5 hover:bg-black/25 dark:hover:bg-white/10 transition-colors cursor-pointer"
+              title="Ẩn thanh công cụ để đọc (hiện thanh tiến trình)"
+            >
+              <EyeOff className="w-4 h-4" />
+            </button>
 
             {/* Single Corner Actions Popover */}
             <div className="relative" ref={moreMenuRef}>
@@ -3426,7 +3743,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         <div
           onClick={(e) => e.stopPropagation()}
           className={`fixed right-5 z-40 flex items-center space-x-1.5 px-2.5 py-1.5 rounded-full bg-neutral-900/95 border border-neutral-700/80 text-neutral-100 shadow-2xl backdrop-blur-md text-xs select-none transition-all ${
-            showUI ? 'bottom-16' : 'bottom-5'
+            showTTS ? 'bottom-20' : !showUI ? 'bottom-12' : 'bottom-5'
           }`}
         >
           <button
@@ -3708,46 +4025,106 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         </div>
       )}
 
-      {/* Bottom Floating Navigation HUD */}
-      {showUI && (
+      {/* Slim Reading Progress Bar (auto-hidden whenever Taskbar/HUD or TTS bar is active) */}
+      {!showUI && !showTTS && (
         <footer
-          className="h-12 border-t border-neutral-800/40 px-5 flex items-center justify-between shrink-0 select-none backdrop-blur-md z-30 transition-all duration-200"
-          style={{ backgroundColor: 'rgba(0,0,0,0.15)' }}
+          onClick={(e) => e.stopPropagation()}
+          className="h-9 border-t border-black/10 dark:border-white/10 px-4 flex items-center gap-3 shrink-0 select-none backdrop-blur-md z-20 transition-all duration-200"
+          style={{ backgroundColor: 'rgba(0,0,0,0.14)' }}
         >
-          <button
-            disabled={currentChapterIndex === 0}
-            onClick={() => handleGoToChapter(currentChapterIndex - 1)}
-            className="flex items-center space-x-1 text-xs font-medium disabled:opacity-30 hover:text-amber-400 transition-colors cursor-pointer"
-          >
-            <ChevronLeft className="w-4 h-4" />
-            <span>Chương trước</span>
-          </button>
+          <span className="text-[11px] font-mono opacity-75 shrink-0">
+            Ch. {currentChapterIndex + 1}/{localChapters.length}
+          </span>
 
-          {/* Chapter slider & stats */}
-          <div className="flex-1 max-w-md mx-6 flex items-center space-x-3">
-            <span className="text-[11px] font-mono opacity-60 shrink-0">
-              {currentChapterIndex + 1}/{localChapters.length}
-            </span>
+          <div className="flex-1 flex items-center">
             <input
               type="range"
               min={0}
-              max={Math.max(0, localChapters.length - 1)}
-              value={currentChapterIndex}
-              onChange={(e) => handleGoToChapter(Number(e.target.value))}
-              className="flex-1 accent-amber-500 cursor-pointer h-1.5"
+              max={100}
+              step={0.01}
+              value={exactOverallPercent}
+              onChange={(e) => handleSeekToPercent(Number(e.target.value))}
+              aria-label="Thanh tiến trình đọc"
+              className="w-full accent-amber-500 cursor-pointer h-1.5"
             />
-            <span className="text-[11px] font-mono font-bold text-amber-500 shrink-0">
-              {currentOverallPercent}%
-            </span>
           </div>
 
+          {isEditingPercent ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleCommitPercentEdit();
+              }}
+              className="flex items-center space-x-1 shrink-0"
+            >
+              <input
+                type="text"
+                inputMode="decimal"
+                value={percentInputStr}
+                onChange={(e) => setPercentInputStr(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.stopPropagation();
+                    setIsEditingPercent(false);
+                  }
+                }}
+                onBlur={handleCommitPercentEdit}
+                autoFocus
+                className="w-16 px-1.5 py-0.5 rounded bg-neutral-900/90 border border-amber-500 text-amber-300 text-[11px] font-mono text-right focus:outline-none"
+                title="Nhập phần trăm (0,00 – 100,00) rồi nhấn Enter"
+              />
+              <span className="text-[11px] font-mono text-amber-500">%</span>
+            </form>
+          ) : (
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                percentDragRef.current = {
+                  startX: e.clientX,
+                  startPercent: exactOverallPercent,
+                  moved: false,
+                };
+              }}
+              onPointerMove={(e) => {
+                const drag = percentDragRef.current;
+                if (!drag) return;
+                const dx = e.clientX - drag.startX;
+                if (Math.abs(dx) >= 3) {
+                  drag.moved = true;
+                }
+                if (drag.moved) {
+                  const nextPct = Math.min(100, Math.max(0, drag.startPercent + dx * 0.2));
+                  handleSeekToPercent(nextPct);
+                }
+              }}
+              onPointerUp={(e) => {
+                const drag = percentDragRef.current;
+                percentDragRef.current = null;
+                if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                }
+                if (drag && !drag.moved) {
+                  handleOpenPercentEdit();
+                }
+              }}
+              onPointerCancel={() => {
+                percentDragRef.current = null;
+              }}
+              className="px-2 py-0.5 rounded-md bg-black/15 dark:bg-white/5 hover:bg-amber-500/20 border border-black/10 dark:border-white/10 text-[11px] font-mono font-bold text-amber-500 shrink-0 cursor-ew-resize transition-colors"
+              title="Bấm để nhập số % hoặc kéo ngang để tua"
+            >
+              {formattedExactPercent}
+            </button>
+          )}
+
           <button
-            disabled={currentChapterIndex >= localChapters.length - 1}
-            onClick={() => handleGoToChapter(currentChapterIndex + 1)}
-            className="flex items-center space-x-1 text-xs font-medium disabled:opacity-30 hover:text-amber-400 transition-colors cursor-pointer"
+            type="button"
+            onClick={() => setShowUI(true)}
+            className="p-1 rounded-md opacity-70 hover:opacity-100 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer shrink-0 transition-opacity"
+            title="Bật thanh công cụ (ẩn thanh tiến trình đọc)"
           >
-            <span>Chương sau</span>
-            <ChevronRight className="w-4 h-4" />
+            <Eye className="w-3.5 h-3.5" />
           </button>
         </footer>
       )}
@@ -3988,6 +4365,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         onClose={() => setShowExport(false)}
         book={book}
         chapters={localChapters}
+        currentChapterIndex={currentChapterIndex}
       />
     </div>
   );

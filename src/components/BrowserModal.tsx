@@ -41,6 +41,13 @@ function normalizeInputUrl(raw: string): string {
   return `https://${trimmed}`;
 }
 
+const DEFAULT_BROWSER_HOME = 'https://www.pixiv.net/';
+const QUICK_SITES = [
+  { label: 'Pixiv Novel', url: 'https://www.pixiv.net/novel/' },
+  { label: 'Syosetsu', url: 'https://ncode.syosetu.com/' },
+  { label: 'Kakuyomu', url: 'https://kakuyomu.jp/' },
+];
+
 export const BrowserModal: React.FC<BrowserModalProps> = ({
   isOpen,
   initialUrl,
@@ -53,9 +60,9 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     typeof window !== 'undefined' && Boolean(window.desktopBridge?.isTauri);
   const isDesktopMode = isElectronMode || isTauriMode;
 
-  const defaultUrl = initialUrl ? normalizeInputUrl(initialUrl) : '';
-  const [history, setHistory] = React.useState<string[]>(defaultUrl ? [defaultUrl] : []);
-  const [historyIndex, setHistoryIndex] = React.useState(defaultUrl ? 0 : -1);
+  const defaultUrl = (initialUrl ? normalizeInputUrl(initialUrl) : '') || DEFAULT_BROWSER_HOME;
+  const [history, setHistory] = React.useState<string[]>([defaultUrl]);
+  const [historyIndex, setHistoryIndex] = React.useState<number>(0);
   const [iframeSrcUrl, setIframeSrcUrl] = React.useState(defaultUrl);
   const [liveUrl, setLiveUrl] = React.useState(defaultUrl);
   const [addressInput, setAddressInput] = React.useState(defaultUrl);
@@ -66,6 +73,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     isDesktopMode ? true : null
   );
   const [challengeBlockedUrl, setChallengeBlockedUrl] = React.useState<string | null>(null);
+  const [browserError, setBrowserError] = React.useState<string | null>(null);
 
   const [cookieJars, setCookieJars] = React.useState<SiteCookieJar[]>([]);
   const [showCookiePopover, setShowCookiePopover] = React.useState(false);
@@ -75,6 +83,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
   const [browserLang, setBrowserLang] = React.useState<'en' | 'ja'>('en');
 
   const cookiePopoverRef = React.useRef<HTMLDivElement>(null);
+  const viewportRef = React.useRef<HTMLDivElement>(null);
   const webviewRef = React.useRef<ElectronWebviewElement | null>(null);
 
   const refreshJars = React.useCallback(async () => {
@@ -82,19 +91,53 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     setCookieJars(synced);
   }, []);
 
+  const measureViewportBounds = React.useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return undefined;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 100 || rect.height < 100) return undefined;
+    return {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  }, []);
+
+  const openOrSyncTauriBrowser = React.useCallback(
+    async (targetUrl: string) => {
+      if (!window.desktopBridge?.isTauri) return;
+      setBrowserError(null);
+      const bounds = measureViewportBounds();
+      try {
+        await window.desktopBridge.openBrowserWindow?.(targetUrl, bounds);
+      } catch (err: any) {
+        const msg =
+          typeof err === 'string'
+            ? err
+            : err?.message || 'Không thể mở trang web trong trình duyệt tích hợp.';
+        setBrowserError(msg);
+        setIsLoadingFrame(false);
+      }
+    },
+    [measureViewportBounds]
+  );
+
   React.useEffect(() => {
     if (!isOpen) return;
-    const startUrl = initialUrl ? normalizeInputUrl(initialUrl) : '';
-    setHistory(startUrl ? [startUrl] : []);
-    setHistoryIndex(startUrl ? 0 : -1);
+    const startUrl =
+      (initialUrl ? normalizeInputUrl(initialUrl) : '') || DEFAULT_BROWSER_HOME;
+    setHistory([startUrl]);
+    setHistoryIndex(0);
     setIframeSrcUrl(startUrl);
     setLiveUrl(startUrl);
     setAddressInput(startUrl);
     setPageTitle('');
-    setIsLoadingFrame(Boolean(startUrl));
+    setIsLoadingFrame(true);
     setShowCookiePopover(false);
     setCookieFeedback(null);
     setChallengeBlockedUrl(null);
+    setBrowserError(null);
 
     hydrateServerCookiesFromIndexedDB(true).then(() => {
       getAllSiteCookies().then(setCookieJars);
@@ -108,8 +151,21 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
           if (lang === 'ja' || lang === 'en') setBrowserLang(lang);
         })
         .catch(() => {});
-      if (window.desktopBridge?.isTauri && startUrl) {
-        window.desktopBridge.openBrowserWindow?.(startUrl).catch(() => {});
+
+      if (window.desktopBridge?.isTauri) {
+        let cancelled = false;
+        const raf1 = requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (!cancelled) {
+              openOrSyncTauriBrowser(startUrl);
+            }
+          });
+        });
+        return () => {
+          cancelled = true;
+          cancelAnimationFrame(raf1);
+          window.desktopBridge?.browserAction?.('close').catch(() => {});
+        };
       }
       return;
     }
@@ -131,7 +187,7 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
         if (d?.lang === 'ja' || d?.lang === 'en') setBrowserLang(d.lang);
       })
       .catch(() => {});
-  }, [isOpen, initialUrl]);
+  }, [isOpen, initialUrl, openOrSyncTauriBrowser]);
 
   // Attach native Electron <webview> listeners when running inside .exe
   React.useEffect(() => {
@@ -251,6 +307,39 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     return () => window.removeEventListener('message', handleMessage);
   }, [isOpen, isDesktopMode, liveUrl, refreshJars]);
 
+  // Keep embedded Tauri child webview aligned with the modal viewport
+  React.useEffect(() => {
+    if (!isOpen || !isTauriMode) return;
+    const syncBounds = () => {
+      const bounds = measureViewportBounds();
+      if (bounds) {
+        window.desktopBridge?.setBrowserBounds?.(bounds).catch(() => {});
+      }
+    };
+    const el = viewportRef.current;
+    const ro = el ? new ResizeObserver(syncBounds) : null;
+    if (el && ro) ro.observe(el);
+    window.addEventListener('resize', syncBounds);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', syncBounds);
+    };
+  }, [isOpen, isTauriMode, measureViewportBounds]);
+
+  // Hide embedded native WebView2 child surface when an HTML popover or error overlay is open
+  React.useEffect(() => {
+    if (!isOpen || !isTauriMode) return;
+    if (showCookiePopover || browserError) {
+      window.desktopBridge?.browserAction?.('hide').catch(() => {});
+    } else {
+      window.desktopBridge?.browserAction?.('show').catch(() => {});
+      const bounds = measureViewportBounds();
+      if (bounds) {
+        window.desktopBridge?.setBrowserBounds?.(bounds).catch(() => {});
+      }
+    }
+  }, [isOpen, isTauriMode, showCookiePopover, browserError, measureViewportBounds]);
+
   React.useEffect(() => {
     if (!showCookiePopover) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -268,6 +357,8 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     const target = normalizeInputUrl(rawUrl);
     if (!target) return;
     setChallengeBlockedUrl(null);
+    setBrowserError(null);
+    setShowCookiePopover(false);
     setHistory((prev) => [...prev.slice(0, historyIndex + 1), target]);
     setHistoryIndex((prev) => prev + 1);
     setIframeSrcUrl(target);
@@ -277,7 +368,15 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
     if (isElectronMode && webviewRef.current) {
       webviewRef.current.loadURL(target).catch(() => {});
     } else if (isTauriMode) {
-      window.desktopBridge?.navigateBrowserWindow?.(target).catch(() => {});
+      const bounds = measureViewportBounds();
+      window.desktopBridge
+        ?.navigateBrowserWindow?.(target, bounds)
+        .catch((err: any) => {
+          setBrowserError(
+            typeof err === 'string' ? err : err?.message || 'Không thể tải trang web này.'
+          );
+          setIsLoadingFrame(false);
+        });
     }
   };
 
@@ -415,7 +514,8 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
       if (isElectronMode && webviewRef.current) {
         webviewRef.current.loadURL(nextTarget).catch(() => {});
       } else if (isTauriMode) {
-        window.desktopBridge?.navigateBrowserWindow?.(nextTarget).catch(() => {});
+        const bounds = measureViewportBounds();
+        window.desktopBridge?.navigateBrowserWindow?.(nextTarget, bounds).catch(() => {});
       }
     }
   };
@@ -658,11 +758,30 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
           </button>
         </div>
 
-        {/* Language & Title Strip */}
-        <div className="px-3 py-1.5 border-b border-neutral-800 bg-neutral-900/80 flex items-center justify-between gap-3 text-[11px]">
-          <span className="text-neutral-500 truncate">
-            {pageTitle || (liveUrl ? liveUrl : 'Chưa mở trang nào')}
-          </span>
+        {/* Quick Site Shortcuts, Status & Language Strip */}
+        <div className="px-3 py-1.5 border-b border-neutral-800 bg-neutral-900/80 flex items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center space-x-1.5 min-w-0">
+            {QUICK_SITES.map((site) => {
+              const active = currentDomain === extractBaseDomain(site.url);
+              return (
+                <button
+                  key={site.url}
+                  type="button"
+                  onClick={() => navigateTo(site.url)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-medium cursor-pointer transition-colors shrink-0 ${
+                    active
+                      ? 'bg-amber-600/20 text-amber-300 border border-amber-500/40'
+                      : 'bg-neutral-800/80 text-neutral-300 hover:bg-neutral-700 border border-neutral-700/60'
+                  }`}
+                >
+                  {site.label}
+                </button>
+              );
+            })}
+            <span className="text-neutral-500 truncate hidden sm:inline pl-1">
+              {pageTitle || liveUrl}
+            </span>
+          </div>
           <div className="flex items-center space-x-2 shrink-0 ml-auto">
             {liveUrl && (
               <a
@@ -781,37 +900,40 @@ export const BrowserModal: React.FC<BrowserModalProps> = ({
           </div>
         )}
 
-        {/* Browser Viewport */}
-        <div className="flex-1 bg-neutral-950 relative overflow-hidden">
+        {/* Unified Browser Viewport */}
+        <div ref={viewportRef} className="flex-1 bg-neutral-950 relative overflow-hidden">
           {isTauriMode ? (
-            <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-300 space-y-4">
-              <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
-                <Globe className="w-7 h-7 text-amber-400" />
-              </div>
-              <div className="flex flex-wrap items-center justify-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => window.desktopBridge?.openBrowserWindow?.(liveUrl || undefined)}
-                  className="flex items-center space-x-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Mở / Hiện cửa sổ trình duyệt</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => refreshJars()}
-                  className="flex items-center space-x-1.5 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-xs font-medium cursor-pointer transition-colors"
-                >
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Đồng bộ Cookie ({currentCookieCount})</span>
-                </button>
-              </div>
-              {liveUrl && (
-                <p className="text-[11px] font-mono text-neutral-500 max-w-xl truncate">
-                  Đang trỏ tới: {liveUrl}
+            browserError ? (
+              <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-300 space-y-3">
+                <AlertTriangle className="w-10 h-10 text-amber-500" />
+                <p className="text-sm font-semibold text-neutral-100">
+                  Không thể mở trang web trong trình duyệt tích hợp
                 </p>
-              )}
-            </div>
+                <p className="text-xs text-red-400 max-w-md">{browserError}</p>
+                <button
+                  type="button"
+                  onClick={() => openOrSyncTauriBrowser(liveUrl || DEFAULT_BROWSER_HOME)}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                >
+                  Thử lại
+                </button>
+              </div>
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center text-center px-6 text-neutral-500 space-y-2">
+                {showCookiePopover ? (
+                  <p className="text-xs text-neutral-400">
+                    Trình duyệt tạm ẩn để hiển thị trình quản lý Cookies.
+                  </p>
+                ) : (
+                  <>
+                    <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
+                    <p className="text-xs text-neutral-400">
+                      Đang hiển thị trình duyệt tích hợp ({currentDomain || 'Web'})...
+                    </p>
+                  </>
+                )}
+              </div>
+            )
           ) : isElectronMode ? (
             iframeSrcUrl ? (
               <webview

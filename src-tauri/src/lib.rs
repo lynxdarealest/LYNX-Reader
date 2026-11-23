@@ -12,8 +12,10 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::{PageLoadEvent, WebviewBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, State, WebviewUrl,
+};
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -120,6 +122,15 @@ pub struct FetchChapterParams {
     pub source_type: Option<String>,
     pub novel_id: Option<String>,
     pub cookie: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 pub struct AppState {
@@ -542,8 +553,8 @@ async fn merge_set_cookies_from_headers(
 }
 
 async fn sync_webview_cookies_into_state(app: &AppHandle, state: &AppState) -> Vec<SiteCookieJar> {
-    if let Some(browser_win) = app.get_webview_window("reader-browser") {
-        if let Ok(wv_cookies) = browser_win.cookies() {
+    if let Some(browser_wv) = app.get_webview("reader-browser") {
+        if let Ok(wv_cookies) = browser_wv.cookies() {
             let mut map = state.cookies_by_domain.lock().await;
             for c in wv_cookies {
                 let raw_domain = c.domain().unwrap_or("").trim_start_matches('.').to_string();
@@ -589,9 +600,9 @@ async fn build_cookie_header_for_url(
     let current = now_ms();
     let mut cookie_map: HashMap<String, String> = HashMap::new();
 
-    // 1. Live WebView2 cookies for this URL if browser window exists
-    if let Some(browser_win) = app.get_webview_window("reader-browser") {
-        if let Ok(wv_cookies) = browser_win.cookies_for_url(target_url.clone()) {
+    // 1. Live WebView2 cookies for this URL if embedded browser exists
+    if let Some(browser_wv) = app.get_webview("reader-browser") {
+        if let Ok(wv_cookies) = browser_wv.cookies_for_url(target_url.clone()) {
             for c in wv_cookies {
                 if c.secure().unwrap_or(false) && !is_https {
                     continue;
@@ -1850,12 +1861,12 @@ async fn desktop_clear_domain_cookies(
     state: State<'_, AppState>,
 ) -> Result<Vec<SiteCookieJar>, String> {
     let base = extract_base_domain(&domain);
-    if let Some(browser_win) = app.get_webview_window("reader-browser") {
-        if let Ok(wv_cookies) = browser_win.cookies() {
+    if let Some(browser_wv) = app.get_webview("reader-browser") {
+        if let Ok(wv_cookies) = browser_wv.cookies() {
             for c in wv_cookies {
                 let c_dom = c.domain().unwrap_or("");
                 if extract_base_domain(c_dom) == base {
-                    let _ = browser_win.delete_cookie(c);
+                    let _ = browser_wv.delete_cookie(c);
                 }
             }
         }
@@ -2117,27 +2128,50 @@ async fn desktop_analyze_phrase(
 }
 
 #[tauri::command]
-async fn desktop_open_browser_window(app: AppHandle, url: Option<String>) -> Result<(), String> {
-    let target_url = match url.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+async fn desktop_open_browser_window(
+    app: AppHandle,
+    url: Option<String>,
+    bounds: Option<BrowserBounds>,
+) -> Result<(), String> {
+    let requested_url = url
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let target_url = match requested_url {
         Some(u) => assert_public_http_url_resolved(u).await?,
         None => Url::parse("https://www.pixiv.net/").unwrap(),
     };
+    let (bx, by, bw, bh) = match bounds {
+        Some(b) => (
+            b.x.max(0.0),
+            b.y.max(0.0),
+            b.width.max(200.0),
+            b.height.max(160.0),
+        ),
+        None => (24.0, 112.0, 1020.0, 660.0),
+    };
 
-    if let Some(existing) = app.get_webview_window("reader-browser") {
-        let _ = existing.navigate(target_url);
+    if let Some(existing) = app.get_webview("reader-browser") {
+        let _ = existing.set_position(Position::Logical(LogicalPosition::new(bx, by)));
+        let _ = existing.set_size(Size::Logical(LogicalSize::new(bw, bh)));
+        if requested_url.is_some() {
+            let _ = existing.navigate(target_url);
+        }
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
     }
 
+    let main_win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Không tìm thấy cửa sổ chính của ứng dụng.".to_string())?;
+    let parent_window: &tauri::Window = main_win.as_ref();
+
     let app_handle = app.clone();
-    WebviewWindowBuilder::new(&app, "reader-browser", WebviewUrl::External(target_url))
-        .title("Trình duyệt tích hợp - LYNX Reader")
-        .inner_size(1100.0, 760.0)
+    let builder = WebviewBuilder::new("reader-browser", WebviewUrl::External(target_url))
         .user_agent(DEFAULT_USER_AGENT)
-        .on_page_load(move |win, payload| {
+        .on_page_load(move |_wv, payload| {
             let url_str = payload.url().to_string();
-            let title_str = win.title().unwrap_or_default();
             match payload.event() {
                 PageLoadEvent::Started => {
                     let _ = app_handle.emit(
@@ -2148,7 +2182,7 @@ async fn desktop_open_browser_window(app: AppHandle, url: Option<String>) -> Res
                 PageLoadEvent::Finished => {
                     let _ = app_handle.emit(
                         "browser-navigated",
-                        serde_json::json!({ "url": url_str, "title": title_str }),
+                        serde_json::json!({ "url": url_str, "title": "" }),
                     );
                     let _ = app_handle.emit(
                         "browser-loading",
@@ -2162,17 +2196,53 @@ async fn desktop_open_browser_window(app: AppHandle, url: Option<String>) -> Res
                     });
                 }
             }
-        })
-        .build()
-        .map_err(|e| format!("Không thể mở cửa sổ trình duyệt: {e}"))?;
+        });
+
+    let _child = parent_window
+        .add_child(
+            builder,
+            LogicalPosition::new(bx, by),
+            LogicalSize::new(bw, bh),
+        )
+        .map_err(|e| format!("Không thể tích hợp trình duyệt vào giao diện: {e}"))?;
 
     Ok(())
 }
 
 #[tauri::command]
-async fn desktop_browser_navigate(app: AppHandle, url: String) -> Result<(), String> {
+async fn desktop_browser_set_bounds(app: AppHandle, bounds: BrowserBounds) -> Result<(), String> {
+    let Some(wv) = app.get_webview("reader-browser") else {
+        return Ok(());
+    };
+    let _ = wv.set_position(Position::Logical(LogicalPosition::new(
+        bounds.x.max(0.0),
+        bounds.y.max(0.0),
+    )));
+    let _ = wv.set_size(Size::Logical(LogicalSize::new(
+        bounds.width.max(200.0),
+        bounds.height.max(160.0),
+    )));
+    Ok(())
+}
+
+#[tauri::command]
+async fn desktop_browser_navigate(
+    app: AppHandle,
+    url: String,
+    bounds: Option<BrowserBounds>,
+) -> Result<(), String> {
     let parsed = assert_public_http_url_resolved(&url).await?;
-    if let Some(existing) = app.get_webview_window("reader-browser") {
+    if let Some(existing) = app.get_webview("reader-browser") {
+        if let Some(b) = bounds {
+            let _ = existing.set_position(Position::Logical(LogicalPosition::new(
+                b.x.max(0.0),
+                b.y.max(0.0),
+            )));
+            let _ = existing.set_size(Size::Logical(LogicalSize::new(
+                b.width.max(200.0),
+                b.height.max(160.0),
+            )));
+        }
         existing
             .navigate(parsed)
             .map_err(|e| format!("Lỗi điều hướng: {e}"))?;
@@ -2180,31 +2250,37 @@ async fn desktop_browser_navigate(app: AppHandle, url: String) -> Result<(), Str
         let _ = existing.set_focus();
         Ok(())
     } else {
-        desktop_open_browser_window(app, Some(parsed.to_string())).await
+        desktop_open_browser_window(app, Some(parsed.to_string()), bounds).await
     }
 }
 
 #[tauri::command]
 async fn desktop_browser_action(app: AppHandle, action: String) -> Result<(), String> {
-    let Some(win) = app.get_webview_window("reader-browser") else {
+    let Some(wv) = app.get_webview("reader-browser") else {
         return Ok(());
     };
     match action.as_str() {
         "back" => {
-            let _ = win.eval("window.history.back()");
+            let _ = wv.eval("window.history.back()");
         }
         "forward" => {
-            let _ = win.eval("window.history.forward()");
+            let _ = wv.eval("window.history.forward()");
         }
         "reload" => {
-            let _ = win.eval("window.location.reload()");
+            let _ = wv.eval("window.location.reload()");
+        }
+        "show" => {
+            let _ = wv.show();
+        }
+        "hide" => {
+            let _ = wv.hide();
         }
         "focus" => {
-            let _ = win.show();
-            let _ = win.set_focus();
+            let _ = wv.show();
+            let _ = wv.set_focus();
         }
         "close" => {
-            let _ = win.close();
+            let _ = wv.close();
         }
         _ => {}
     }
@@ -2248,6 +2324,7 @@ pub fn run() {
             desktop_translate,
             desktop_analyze_phrase,
             desktop_open_browser_window,
+            desktop_browser_set_bounds,
             desktop_browser_navigate,
             desktop_browser_action,
         ])

@@ -26,9 +26,18 @@ export interface DesktopBridgeApi {
   clearDomainCookies: (domain: string) => Promise<SiteCookieJar[]>;
   getPreferredLang: () => Promise<'en' | 'ja'>;
   setPreferredLang: (lang: 'en' | 'ja') => Promise<'en' | 'ja'>;
-  openBrowserWindow?: (url?: string) => Promise<void>;
-  navigateBrowserWindow?: (url: string) => Promise<void>;
-  browserAction?: (action: 'back' | 'forward' | 'reload' | 'focus' | 'close') => Promise<void>;
+  openBrowserWindow?: (
+    url?: string,
+    bounds?: { x: number; y: number; width: number; height: number }
+  ) => Promise<void>;
+  setBrowserBounds?: (bounds: { x: number; y: number; width: number; height: number }) => Promise<void>;
+  navigateBrowserWindow?: (
+    url: string,
+    bounds?: { x: number; y: number; width: number; height: number }
+  ) => Promise<void>;
+  browserAction?: (
+    action: 'back' | 'forward' | 'reload' | 'show' | 'hide' | 'focus' | 'close'
+  ) => Promise<void>;
 }
 
 export interface ElectronWebviewElement extends HTMLElement {

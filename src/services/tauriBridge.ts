@@ -30,11 +30,25 @@ export function initDesktopBridge(): void {
     getPreferredLang: () => invoke<'en' | 'ja'>('desktop_get_preferred_lang'),
     setPreferredLang: (lang: 'en' | 'ja') =>
       invoke<'en' | 'ja'>('desktop_set_preferred_lang', { lang }),
-    openBrowserWindow: (url?: string) =>
-      invoke<void>('desktop_open_browser_window', { url: url ?? null }),
-    navigateBrowserWindow: (url: string) =>
-      invoke<void>('desktop_browser_navigate', { url }),
-    browserAction: (action: 'back' | 'forward' | 'reload' | 'focus' | 'close') =>
+    openBrowserWindow: (
+      url?: string,
+      bounds?: { x: number; y: number; width: number; height: number }
+    ) =>
+      invoke<void>('desktop_open_browser_window', {
+        url: url ?? null,
+        bounds: bounds ?? null,
+      }),
+    setBrowserBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
+      invoke<void>('desktop_browser_set_bounds', { bounds }),
+    navigateBrowserWindow: (
+      url: string,
+      bounds?: { x: number; y: number; width: number; height: number }
+    ) =>
+      invoke<void>('desktop_browser_navigate', {
+        url,
+        bounds: bounds ?? null,
+      }),
+    browserAction: (action: 'back' | 'forward' | 'reload' | 'show' | 'hide' | 'focus' | 'close') =>
       invoke<void>('desktop_browser_action', { action }),
   };
 }

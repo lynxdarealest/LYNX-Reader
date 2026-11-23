@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, BookOpen, Edit2, Check, Image, Trash2, Tag, Scissors, RefreshCw, Globe, Loader2, Languages } from 'lucide-react';
+import { X, BookOpen, Edit2, Check, Image, Trash2, Tag, Scissors, RefreshCw, Globe, Loader2, Languages, Download } from 'lucide-react';
 import { Book, BookStatus, Chapter } from '../types';
 import {
   saveBook,
@@ -19,6 +19,7 @@ import {
   translateBookChapters,
   BookTranslationProgress,
 } from '../services/translator';
+import { ExportModal } from './ExportModal';
 
 interface BookDetailModalProps {
   book: Book | null;
@@ -55,6 +56,9 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   const [translateBookProgress, setTranslateBookProgress] = React.useState<BookTranslationProgress | null>(null);
   const translateAbortRef = React.useRef<AbortController | null>(null);
   const fileCoverInputRef = React.useRef<HTMLInputElement>(null);
+  const [showExport, setShowExport] = React.useState(false);
+  const [exportChapters, setExportChapters] = React.useState<Chapter[]>([]);
+  const [isOpeningExport, setIsOpeningExport] = React.useState(false);
 
   React.useEffect(() => {
     if (!isOpen) {
@@ -62,6 +66,8 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
       translateAbortRef.current = null;
       setIsTranslatingBook(false);
       setTranslateBookProgress(null);
+      setShowExport(false);
+      setExportChapters([]);
       return;
     }
     if (book) {
@@ -248,6 +254,20 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
       if (translateAbortRef.current === controller) {
         translateAbortRef.current = null;
       }
+    }
+  };
+
+  const handleOpenExportFromModal = async () => {
+    if (!book || isOpeningExport) return;
+    setIsOpeningExport(true);
+    try {
+      const chs = await getChaptersByBookId(book.id);
+      setExportChapters(chs);
+      setShowExport(true);
+    } catch (err: any) {
+      setWebUpdateStatus(err?.message || 'Không thể tải danh sách chương để xuất.');
+    } finally {
+      setIsOpeningExport(false);
     }
   };
 
@@ -516,7 +536,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between">
+        <div className="px-5 py-3 border-t border-neutral-800 bg-neutral-950 flex flex-wrap items-center justify-between gap-2">
           {isEditing ? (
             <div className="flex items-center space-x-2">
               <button
@@ -534,7 +554,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
               </button>
             </div>
           ) : (
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => setIsEditing(true)}
                 className="flex items-center space-x-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-medium transition-colors cursor-pointer"
@@ -553,6 +573,19 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                   <span>Quản lý chương</span>
                 </button>
               )}
+              <button
+                type="button"
+                onClick={handleOpenExportFromModal}
+                disabled={isOpeningExport}
+                className="flex items-center space-x-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isOpeningExport ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
+                ) : (
+                  <Download className="w-3.5 h-3.5 text-amber-500" />
+                )}
+                <span>Xuất truyện</span>
+              </button>
               {onDeleteBook && (
                 <button
                   onClick={(e) => onDeleteBook(book.id, e)}
@@ -565,7 +598,7 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
             </div>
           )}
 
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-2 ml-auto">
             {!isEditing && (
               isTranslatingBook ? (
                 <button
@@ -604,6 +637,14 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
           </div>
         </div>
       </div>
+
+      <ExportModal
+        isOpen={showExport}
+        onClose={() => setShowExport(false)}
+        book={book}
+        chapters={exportChapters}
+        currentChapterIndex={book.currentChapterIndex}
+      />
     </div>
   );
 };
