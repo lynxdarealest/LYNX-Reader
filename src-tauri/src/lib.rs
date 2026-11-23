@@ -2162,10 +2162,10 @@ async fn desktop_open_browser_window(
         return Ok(());
     }
 
-    let main_win = app
+    let main_win: tauri::WebviewWindow = app
         .get_webview_window("main")
         .ok_or_else(|| "Không tìm thấy cửa sổ chính của ứng dụng.".to_string())?;
-    let parent_window: &tauri::Window = main_win.as_ref();
+    let parent_window = main_win.as_ref().window();
 
     let app_handle = app.clone();
     let builder = WebviewBuilder::new("reader-browser", WebviewUrl::External(target_url))
